@@ -1,0 +1,26 @@
+# 仓库里统一存 LF。没有这个文件，Windows 上提交会刷一屏
+# "LF will be replaced by CRLF"，而 mac/Linux 克隆后会看到整片行尾变更。
+* text=auto
+
+# 源码显式锁 LF —— 让检出结果在所有平台一致，不受 core.eol 影响
+*.rs    text eol=lf
+*.toml  text eol=lf
+*.json  text eol=lf
+*.js    text eol=lf
+*.css   text eol=lf
+*.html  text eol=lf
+*.md    text eol=lf
+*.lock  text eol=lf
+.gitignore     text eol=lf
+.gitattributes text eol=lf
+
+# PowerShell 脚本只在 Windows 跑，按 Windows 惯例用 CRLF。
+# 注意：这些文件带 UTF-8 BOM（PowerShell 5.1 不认无 BOM 的 UTF-8 中文），
+# BOM 属于内容字节，不受行尾规范化影响。
+*.ps1   text eol=crlf
+
+# 二进制，别碰
+*.png   binary
+*.ico   binary
+*.exe   binary
+*.zip   binary

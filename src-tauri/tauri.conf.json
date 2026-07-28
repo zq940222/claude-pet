@@ -1,7 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Claude Pet",
-  "version": "0.1.0",
   "identifier": "com.opsmateai.claude-pet",
   "build": {
     "frontendDist": "../ui"
@@ -20,7 +19,7 @@
         "alwaysOnTop": true,
         "skipTaskbar": true,
         "shadow": false,
-        "visible": true
+        "visible": false
       }
     ],
     "security": {
