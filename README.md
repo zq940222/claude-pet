@@ -29,12 +29,12 @@ Claude Code hooks (type: "http")
         │  POST 事件 JSON
         ▼
 127.0.0.1:47800  ← tiny_http，跑在 Tauri 的 Rust 侧后台线程
-        │  归类成状态 + 按 session_id 聚合
+        │  归类成状态，按 session_id 建会话，按项目分组成工作空间
         ▼
-  app.emit("pet://state")
+  app.emit("pet://view")
         │
         ▼
-   WebView（CSS/SVG 渲染）
+   WebView（CSS/SVG 渲染 + 折叠状态机）
 ```
 
 用 HTTP 而不是状态文件中转，是因为官方文档明确：**hook 的 HTTP 连接失败或超时属于非阻塞错误，执行继续**。所以挂件没启动时 hook 静默失败，完全不影响 Claude Code 干活 —— 不需要任何降级逻辑。
@@ -49,9 +49,26 @@ Claude Code hooks (type: "http")
 | `idle` | `Notification` / `idle_prompt`、`Stop`、`SessionStart` | 灰色，闭眼 |
 | `done` | `Notification` / `agent_completed` | 绿色，笑眼 |
 
-多会话按 `session_id` 分别记账。上镜规则：**等你操作 > 干活中 > 完成 > 空闲**，同优先级取最近更新的。右上角角标在会话数 > 1 时出现，有人在等你时显示 `等待数/总数` 并标红。
+## 一个会话 = 一只宠物，一个项目 = 一个工作空间
 
-`SessionEnd` 会把会话从表里摘掉，否则关掉的终端会一直挂在计数里。
+`session_id` 唯一确定一只宠物；`cwd` 的末段作为工作空间名把宠物归组。宠物顺序按 `first_seen` 排 —— HashMap 的迭代顺序是随机的，不排序图标每次刷新都会乱跳。
+
+`SessionEnd` 会把宠物摘掉，否则关掉的终端会一直挂着一只。会话的 `cwd` 变了会重新归组。
+
+**展开态**：每个项目一行，行内是该项目下的宠物（带序号，可点选）；下方是选中宠物的详情。超过 5 行转滚动，选中的宠物会被滚进视野。
+
+**折叠态**：一条紧凑胶囊，只有宠物点阵。工作空间 ≤ 3 个时显示项目名，多了就只留点 —— 7 个项目名塞进折叠条只会全被截成 `my-vid...` 这种没信息量的碎片，名字在展开态和 tooltip 里都拿得到。
+
+## 什么时候自动展开
+
+| 情况 | 行为 |
+| --- | --- |
+| 任一会话进入 `waiting-permission` / `waiting-input` | **强制展开**并自动选中它 |
+| 所有等待都处理完 | 自动收起 |
+| 手动点开合按钮 | 记住你的选择，压制上面的自动规则 |
+| 手动收起后又来了**新的**等待事项 | 重新强制展开 |
+
+最后一条靠比对「等待中会话集合的签名」实现：只有签名变化才算新事项。所以手动收起能真正生效（同一批等待不会反复弹回来），但新的待处理事项一定叫得到你。
 
 ## 从源码跑
 
@@ -94,13 +111,21 @@ claude-pet.exe --autostart-status     # 0 = 已开启, 2 = 已关闭, 1 = 读不
 
 ## 前端没有构建步骤
 
-`frontendDist` 直接指向 `../ui`，纯静态 HTML/CSS/JS，不用 npm、不用 vite。改 `ui/` 下的文件保存后刷新窗口即可（`cargo run` 时按 F5，或用 devtools）。
+`frontendDist` 直接指向 `../ui`，纯静态 HTML/CSS/JS，不用 npm、不用 vite。
+
+**但改了 `ui/` 下的文件必须重新 `cargo build`** —— `tauri-build` 会把前端资源在编译期嵌进二进制，不是运行时从磁盘读。（`tauri-build` 对 `ui/` 有 rerun-if-changed，所以只改前端也会触发一次重编译，几秒钟。）
 
 代价是拿不到 `@tauri-apps/api` 的 npm 包，所以靠 `withGlobalTauri: true` 注入的 `window.__TAURI__`。
 
 ## 几个刻意的设计决定
 
-**窗口尺寸贴合宠物本体（248×96）。** Tauri 的 `setIgnoreCursorEvents` 是整窗开关、没有 per-region，想做「宠物身上能点、周围透明区域穿透」就得自己写命中测试。把窗口做小直接绕开了这个问题 —— 没有大片透明区域，就不需要穿透。
+**窗口尺寸贴合卡片本体。** Tauri 的 `setIgnoreCursorEvents` 是整窗开关、没有 per-region，想做「宠物身上能点、周围透明区域穿透」就得自己写命中测试。把窗口做到刚好包住卡片直接绕开了这个问题 —— 没有大片透明区域，就不需要穿透。
+
+**尺寸同时锚定右边和底边。** 前端量完卡片调 `resize_pet`，Rust 侧保持右下角不动、朝左上生长。只锚底边的话，折叠态点阵横向变长时窗口会冲出屏幕右缘；只锚左上角的话，展开时会长出屏幕底部。位置持久化存的也是右下角，和这个方向保持一致。
+
+**卡片必须 `flex-shrink: 0`，别删。** 窗口尺寸是量卡片得出的，而卡片作为 body 的 flex 子项默认会被窗口宽度挤压 —— 于是形成循环依赖：窗口小 → 卡片被压 → 量出来还是小 → 窗口永远长不大，点阵被压扁裁断。禁止收缩后，卡片先按内容溢出视口，量到真实尺寸，下一帧窗口就跟上了。
+
+同理，`.strip` 上**不能**设 `min-width: 0` 或 `overflow: hidden`：两者都会让它不参与卡片的 max-content 计算，结果一样是内容被压扁 —— 而 `overflow: hidden` 更坏，它把这个 bug 藏起来，看着像「刚好放下」。
 
 **每 5 秒重新 `set_always_on_top(true)`。** Windows 上独占全屏程序和 UAC 安全桌面会抢走 topmost。这个调用是幂等的，不抢焦点。
 

@@ -11,7 +11,6 @@ body {
   height: 100%;
   background: transparent;
   overflow: hidden;
-  /* 挂件不是文档，禁掉选中和右键菜单的默认观感 */
   user-select: none;
   -webkit-user-select: none;
   cursor: default;
@@ -19,35 +18,59 @@ body {
     system-ui, sans-serif;
 }
 
-/* ── 卡片本体 ───────────────────────────────────────────── */
+/* 卡片贴右下角。窗口尺寸由 JS 量完内容后调 resize_pet 设置，
+   这里留 10px 让自绘阴影有地方画（窗口外的阴影会被裁掉）。 */
+body {
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  padding: 10px;
+}
 
-.pet {
+/* ── 卡片 ───────────────────────────────────────────────── */
+
+.card {
+  /* 默认色，被 .state-* 覆盖 */
   --accent: #8b95a5;
   --card: rgba(24, 26, 32, 0.9);
 
   position: relative;
   display: flex;
-  align-items: center;
-  gap: 12px;
-  width: 100%;
-  height: 100%;
-  padding: 0 14px 0 12px;
+  flex-direction: column;
+
+  /* flex-shrink:0 是关键，别删。
+     窗口尺寸是量这张卡得出的，而卡片作为 body 的 flex 子项默认会被
+     窗口宽度挤压 —— 于是形成循环依赖：窗口小 -> 卡片被压 -> 量出来还是小
+     -> 窗口永远长不大，内容被压扁。禁止收缩后，卡片先按内容溢出视口，
+     量到真实尺寸，下一帧窗口就跟上了。 */
+  flex: 0 0 auto;
+
+  /* min-width 不能太小：.info 设了 min-width:0（否则 ellipsis 不生效），
+     因此它不参与 max-content 计算，卡片宽度只由工作空间行决定，
+     详情文字会被挤成两三个字。290 是给详情留出的下限。 */
+  width: max-content;
+  min-width: 290px;
+  max-width: 340px;
 
   background: var(--card);
   border: 1px solid rgba(255, 255, 255, 0.09);
-  border-radius: 18px;
-  /* 窗口本身关了阴影（shadow: false），这里自己画一个，避免系统阴影带来直角边 */
+  border-radius: 16px;
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
   backdrop-filter: blur(14px);
   transition: border-color 0.35s ease;
 }
 
-.pet.state-waiting-permission,
-.pet.state-waiting-input {
-  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+/* min-width 是给展开态的详情文字留的下限，折叠态不需要 ——
+   否则点阵右边会拖着一大片空白。折叠时贴合内容做成一个小胶囊。 */
+.card.collapsed {
+  min-width: 0;
 }
 
-/* 每个状态只换一个 --accent，下面所有元素跟着变色 */
+.card.has-waiting {
+  border-color: color-mix(in srgb, #ff5f56 55%, transparent);
+}
+
+/* 状态色。折叠态的卡片描边跟随最紧急的那只宠物。 */
 .state-working {
   --accent: #4a9eff;
 }
@@ -62,18 +85,274 @@ body {
   --accent: #3fcf70;
 }
 
-/* ── 头像 ───────────────────────────────────────────────── */
+/* ── 头部 ───────────────────────────────────────────────── */
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px 7px 8px;
+  min-height: 34px;
+}
+
+.chev {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  border: 0;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.07);
+  color: #aeb6c2;
+  font-size: 9px;
+  line-height: 18px;
+  text-align: center;
+  cursor: pointer;
+  transition: background 0.15s ease, transform 0.2s ease;
+}
+
+.chev:hover {
+  background: rgba(255, 255, 255, 0.14);
+  color: #eef1f6;
+}
+
+.chev::before {
+  content: "\25B8"; /* ▸ */
+  display: block;
+}
+
+.card:not(.collapsed) .chev::before {
+  content: "\25BE"; /* ▾ */
+}
+
+.summary {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  color: #cbd2dd;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 折叠 / 展开：切换头部里显示 strip 还是 summary，并隐藏下面两块 */
+.card.collapsed .summary,
+.card:not(.collapsed) .strip {
+  display: none;
+}
+
+.card.collapsed .workspaces,
+.card.collapsed .detail {
+  display: none;
+}
+
+/* ── 折叠态点阵 ─────────────────────────────────────────── */
+
+.strip {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  row-gap: 6px;
+  /* 刻意不设 min-width:0，也不设 overflow:hidden。
+     两者都会让这个 flex 子项不参与卡片的 max-content 计算 ——
+     结果是卡片缩到最小宽度、点阵被压扁裁断（而 overflow:hidden
+     还会把这个 bug 藏起来，看着像"刚好放下"）。
+     现在：内容决定卡片宽度，撞到 max-width 后转为换行。 */
+}
+
+/* 只剩点阵时，组间距要比组内间距明显大，才看得出工作空间的分界 */
+.strip.dots-only {
+  gap: 11px;
+}
+.strip.dots-only .strip-group {
+  gap: 5px;
+}
+
+.strip-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.strip-name {
+  font-size: 10.5px;
+  color: #79818f;
+  /* 74px 时 "my-video" 会被截成 "my-vid..."，得不偿失 */
+  max-width: 96px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.strip-empty {
+  font-size: 11.5px;
+  color: #79818f;
+}
+
+/* ── 工作空间行 ─────────────────────────────────────────── */
+
+.workspaces {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px 12px 8px 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  margin-top: 1px;
+  /* 限高 —— 开五六个项目时卡片会长到 400px+，对常驻挂件太占地方。
+     约 5 行后转滚动，JS 会把选中的宠物滚进视野。 */
+  max-height: 134px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* 细滚动条，默认的在这么小的卡片上太粗 */
+.workspaces::-webkit-scrollbar {
+  width: 5px;
+}
+.workspaces::-webkit-scrollbar-track {
+  background: transparent;
+}
+.workspaces::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.16);
+  border-radius: 3px;
+}
+.workspaces::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.28);
+}
+
+.ws {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 3px 0;
+}
+
+.ws-name {
+  flex: 0 0 auto;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: #9aa3b1;
+  max-width: 134px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ws-dots {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+/* ── 宠物图标 ───────────────────────────────────────────── */
+
+/* 宠物点的颜色。跟 --accent 分开是因为一张卡上会同时出现
+   多只不同状态的宠物，不能共用一个变量。 */
+.pet.s-working {
+  --dot: #4a9eff;
+}
+.pet.s-waiting-permission,
+.pet.s-waiting-input {
+  --dot: #ff5f56;
+}
+.pet.s-idle {
+  --dot: #8b95a5;
+}
+.pet.s-done {
+  --dot: #3fcf70;
+}
+
+/* 一个会话 = 一只宠物。折叠态是纯色点，展开态带序号且可点选。 */
+.pet {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--dot) 24%, transparent);
+  border: 1.5px solid var(--dot);
+  color: var(--dot);
+  cursor: pointer;
+  transition: transform 0.12s ease, box-shadow 0.2s ease;
+}
+
+.pet.mini {
+  width: 11px;
+  height: 11px;
+  border-width: 0;
+  background: var(--dot);
+  cursor: default;
+}
+
+.pet.big {
+  width: 20px;
+  height: 20px;
+  font-size: 10.5px;
+  font-weight: 700;
+}
+
+.pet.big:hover {
+  transform: scale(1.14);
+}
+
+/* 选中的那只加一圈外环 */
+.pet.big.selected {
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.22);
+}
+
+/* 等你操作的宠物一直呼吸，余光里也能注意到 */
+.pet.waiting {
+  animation: pet-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes pet-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--dot) 60%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 9px 3px color-mix(in srgb, var(--dot) 45%, transparent);
+  }
+}
+
+.pet.big.selected.waiting {
+  animation: pet-pulse-selected 1.4s ease-in-out infinite;
+}
+
+@keyframes pet-pulse-selected {
+  0%,
+  100% {
+    box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.22);
+  }
+  50% {
+    box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.22),
+      0 0 9px 3px color-mix(in srgb, var(--dot) 45%, transparent);
+  }
+}
+
+/* ── 详情面板 ───────────────────────────────────────────── */
+
+.detail {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px 10px 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
 
 .avatar {
   position: relative;
   flex: 0 0 auto;
-  width: 46px;
-  height: 46px;
+  width: 38px;
+  height: 38px;
   display: grid;
   place-items: center;
 }
 
-/* 「干活中」的转圈：conic-gradient 描边，只在 working 下转 */
 .ring {
   position: absolute;
   inset: -3px;
@@ -86,7 +365,6 @@ body {
   );
   opacity: 0;
   transition: opacity 0.3s ease;
-  /* 只留一圈环，中间抠掉 */
   mask: radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 0);
   -webkit-mask: radial-gradient(
     farthest-side,
@@ -95,7 +373,7 @@ body {
   );
 }
 
-.state-working .ring {
+.detail.state-working .ring {
   opacity: 1;
   animation: spin 1.1s linear infinite;
 }
@@ -107,9 +385,8 @@ body {
 }
 
 .face {
-  width: 40px;
-  height: 40px;
-  position: relative;
+  width: 34px;
+  height: 34px;
 }
 
 .head {
@@ -144,27 +421,20 @@ body {
   display: none;
 }
 
-.state-working .eyes-open,
-.state-working .mouth-flat {
-  display: block;
-}
-.state-waiting-permission .eyes-wide,
-.state-waiting-permission .mouth-open,
-.state-waiting-input .eyes-wide,
-.state-waiting-input .mouth-open {
-  display: block;
-}
-.state-idle .eyes-closed,
-.state-idle .mouth-flat {
-  display: block;
-}
-.state-done .eyes-happy,
-.state-done .mouth-smile {
+.detail.state-working .eyes-open,
+.detail.state-working .mouth-flat,
+.detail.state-waiting-permission .eyes-wide,
+.detail.state-waiting-permission .mouth-open,
+.detail.state-waiting-input .eyes-wide,
+.detail.state-waiting-input .mouth-open,
+.detail.state-idle .eyes-closed,
+.detail.state-idle .mouth-flat,
+.detail.state-done .eyes-happy,
+.detail.state-done .mouth-smile {
   display: block;
 }
 
-/* 干活时眼珠左右瞟，比静止的脸有生气 */
-.state-working .eyes-open {
+.detail.state-working .eyes-open {
   animation: glance 2.4s ease-in-out infinite;
 }
 
@@ -183,9 +453,8 @@ body {
   }
 }
 
-/* 等你操作时整个头像呼吸发光 —— 余光里也能注意到 */
-.state-waiting-permission .avatar,
-.state-waiting-input .avatar {
+.detail.state-waiting-permission .avatar,
+.detail.state-waiting-input .avatar {
   animation: breathe 1.5s ease-in-out infinite;
   border-radius: 50%;
 }
@@ -202,26 +471,24 @@ body {
 
 .bang {
   position: absolute;
-  top: -3px;
-  right: -3px;
-  width: 16px;
-  height: 16px;
+  top: -2px;
+  right: -2px;
+  width: 15px;
+  height: 15px;
   border-radius: 50%;
   background: var(--accent);
   color: #12141a;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 800;
-  line-height: 16px;
+  line-height: 15px;
   text-align: center;
   display: none;
 }
 
-.state-waiting-permission .bang,
-.state-waiting-input .bang {
+.detail.state-waiting-permission .bang,
+.detail.state-waiting-input .bang {
   display: block;
 }
-
-/* ── 文字 ───────────────────────────────────────────────── */
 
 .info {
   flex: 1 1 auto;
@@ -232,7 +499,7 @@ body {
 }
 
 .line-1 {
-  font-size: 13px;
+  font-size: 12.5px;
   font-weight: 600;
   color: #eef1f6;
   white-space: nowrap;
@@ -240,41 +507,20 @@ body {
   text-overflow: ellipsis;
 }
 
-.project {
+.dproj {
   color: #6f7887;
   font-weight: 500;
 }
-.project:not(:empty)::before {
+.dproj:not(:empty)::before {
   content: " · ";
 }
 
 .line-2 {
-  font-size: 11.5px;
+  font-size: 11px;
   color: var(--accent);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   font-variant-numeric: tabular-nums;
   transition: color 0.35s ease;
-}
-
-.badge {
-  position: absolute;
-  top: 6px;
-  right: 8px;
-  min-width: 17px;
-  height: 17px;
-  padding: 0 5px;
-  border-radius: 9px;
-  background: rgba(255, 255, 255, 0.1);
-  color: #b9c1cd;
-  font-size: 10.5px;
-  font-weight: 700;
-  line-height: 17px;
-  text-align: center;
-}
-
-.badge.alert {
-  background: var(--accent);
-  color: #12141a;
 }

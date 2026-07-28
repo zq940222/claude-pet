@@ -1,10 +1,12 @@
 // Claude Pet —— 常驻置顶的 Claude Code 状态挂件
 //
 // 数据流：Claude Code 的 hook（type: "http"）POST 事件 JSON 到 127.0.0.1:47800，
-// 这里解析成状态后 emit 给 WebView 渲染。
+// 这里解析成会话树后 emit 给 WebView 渲染。
 //
 // 为什么用 HTTP 而不是状态文件：官方文档明确「连接失败或超时 = 非阻塞错误，执行继续」，
 // 所以挂件没开的时候 hook 静默失败，完全不影响 Claude Code 干活。
+//
+// 模型：一个会话 = 一只宠物；一个项目（cwd 末段）= 一个工作空间，容纳该项目下的所有会话。
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -17,7 +19,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
+use tauri::{AppHandle, Emitter, LogicalSize, Manager, WebviewWindow};
 use tauri_plugin_autostart::{ManagerExt as AutostartExt, MacosLauncher};
 
 /// 挂件监听端口。改这里的话记得同步改 ~/.claude/settings.json 里的 hook url。
@@ -25,29 +27,48 @@ const PORT: u16 = 47800;
 
 // ── 会话状态 ─────────────────────────────────────────────────
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug)]
 struct Session {
     project: String,
     state: String,
     detail: String,
+    /// 首次出现的时间。用来给宠物图标定一个稳定顺序 ——
+    /// HashMap 的迭代顺序是随机的，不排序图标每次刷新都会乱跳。
+    first_seen: u128,
     updated_ms: u128,
 }
 
-/// 聚合后真正显示在挂件上的东西。
 #[derive(Clone, Debug, Serialize)]
-struct PetView {
+struct SessionView {
+    id: String,
+    /// 工作空间内的 1-based 序号，给宠物当显示名
+    index: usize,
     state: String,
-    project: String,
     detail: String,
-    sessions: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct WorkspaceView {
+    project: String,
+    sessions: Vec<SessionView>,
+    /// 该工作空间里最紧急的状态，折叠态给工作空间标签着色用
+    worst: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct AppView {
+    workspaces: Vec<WorkspaceView>,
+    total: usize,
     waiting: usize,
+    /// 最该被关注的会话 id。前端用它做自动选中和自动展开判断。
+    focus: Option<String>,
 }
 
 type Store = Arc<Mutex<HashMap<String, Session>>>;
 
-/// 窗口最新位置。拖动时只更新内存，由后台线程节流落盘 ——
-/// Moved 事件在一次拖动里会触发几百次，每次都写文件太糙。
-type PosState = Arc<Mutex<Option<(i32, i32)>>>;
+/// 窗口右下角锚点 (right, bottom)。折叠/展开会同时改宽高，存左上角的话
+/// 挂件每次重启会按当时的折叠状态上下左右漂移。恢复时反算左上角。
+type AnchorState = Arc<Mutex<Option<(i32, i32)>>>;
 
 fn now_ms() -> u128 {
     SystemTime::now()
@@ -56,7 +77,7 @@ fn now_ms() -> u128 {
         .unwrap_or(0)
 }
 
-/// 多会话时谁上镜：等你操作的优先，其次在干活的，最后才是空闲。
+/// 谁更紧急：等你操作的优先，其次在干活的，最后才是空闲。
 fn priority(state: &str) -> u8 {
     match state {
         "waiting-permission" => 4,
@@ -67,14 +88,20 @@ fn priority(state: &str) -> u8 {
     }
 }
 
-/// 从 cwd 取最后一段当项目名。Windows 反斜杠和 POSIX 斜杠都要吃。
+/// 从 cwd 取最后一段当工作空间名。Windows 反斜杠和 POSIX 斜杠都要吃。
 fn project_of(cwd: &str) -> String {
-    cwd.replace('\\', "/")
+    let name = cwd
+        .replace('\\', "/")
         .trim_end_matches('/')
         .rsplit('/')
         .next()
         .unwrap_or("")
-        .to_string()
+        .to_string();
+    if name.is_empty() {
+        "unknown".into()
+    } else {
+        name
+    }
 }
 
 /// 把 hook 事件翻译成 (状态, 详情)。返回 None 表示这个事件不改变状态。
@@ -138,7 +165,7 @@ fn handle_event(store: &Store, v: &Value) {
         .unwrap_or("unknown")
         .to_string();
 
-    // 会话结束就从表里摘掉，否则关掉的终端会一直挂在计数里
+    // 会话结束就从表里摘掉，否则关掉的终端会一直挂着一只宠物
     if v.get("hook_event_name").and_then(Value::as_str) == Some("SessionEnd") {
         if let Ok(mut m) = store.lock() {
             m.remove(&sid);
@@ -148,67 +175,126 @@ fn handle_event(store: &Store, v: &Value) {
 
     if let Some((state, detail)) = classify(v) {
         let project = project_of(v.get("cwd").and_then(Value::as_str).unwrap_or(""));
+        let now = now_ms();
         if let Ok(mut m) = store.lock() {
+            // first_seen 只在第一次出现时写，后续更新要保留 —— 否则图标顺序会变
+            let first_seen = m.get(&sid).map(|s| s.first_seen).unwrap_or(now);
             m.insert(
                 sid,
                 Session {
                     project,
                     state,
                     detail,
-                    updated_ms: now_ms(),
+                    first_seen,
+                    updated_ms: now,
                 },
             );
         }
     }
 }
 
-fn aggregate(store: &Store) -> PetView {
+fn empty_view() -> AppView {
+    AppView {
+        workspaces: Vec::new(),
+        total: 0,
+        waiting: 0,
+        focus: None,
+    }
+}
+
+fn build_view(store: &Store) -> AppView {
     let map = match store.lock() {
         Ok(m) => m,
-        Err(_) => {
-            return PetView {
-                state: "idle".into(),
-                project: String::new(),
-                detail: "状态读取失败".into(),
-                sessions: 0,
-                waiting: 0,
-            }
-        }
+        Err(_) => return empty_view(),
     };
 
-    let waiting = map
-        .values()
-        .filter(|s| s.state.starts_with("waiting"))
-        .count();
-
-    // 优先级相同时取最近更新的那个
-    let best = map.values().max_by(|a, b| {
-        priority(&a.state)
-            .cmp(&priority(&b.state))
-            .then(a.updated_ms.cmp(&b.updated_ms))
+    // 按 first_seen 排 —— 宠物图标的顺序必须稳定
+    let mut all: Vec<(&String, &Session)> = map.iter().collect();
+    all.sort_by(|a, b| {
+        a.1.first_seen
+            .cmp(&b.1.first_seen)
+            .then_with(|| a.0.cmp(b.0))
     });
 
-    match best {
-        Some(s) => PetView {
+    let mut workspaces: Vec<WorkspaceView> = Vec::new();
+    for (id, s) in &all {
+        if !workspaces.iter().any(|w| w.project == s.project) {
+            workspaces.push(WorkspaceView {
+                project: s.project.clone(),
+                sessions: Vec::new(),
+                worst: "idle".into(),
+            });
+        }
+        // 上面刚保证存在，unwrap 安全
+        let ws = workspaces
+            .iter_mut()
+            .find(|w| w.project == s.project)
+            .expect("workspace just inserted");
+
+        ws.sessions.push(SessionView {
+            id: (*id).clone(),
+            index: ws.sessions.len() + 1,
             state: s.state.clone(),
-            project: s.project.clone(),
             detail: s.detail.clone(),
-            sessions: map.len(),
-            waiting,
-        },
-        None => PetView {
-            state: "idle".into(),
-            project: String::new(),
-            detail: "没有活动会话".into(),
-            sessions: 0,
-            waiting: 0,
-        },
+        });
+        if priority(&s.state) > priority(&ws.worst) {
+            ws.worst = s.state.clone();
+        }
+    }
+
+    let waiting = all
+        .iter()
+        .filter(|(_, s)| s.state.starts_with("waiting"))
+        .count();
+
+    // 最紧急的那个；同优先级取最近更新的
+    let focus = all
+        .iter()
+        .max_by_key(|(_, s)| (priority(&s.state), s.updated_ms))
+        .map(|(id, _)| (*id).clone());
+
+    AppView {
+        workspaces,
+        total: all.len(),
+        waiting,
+        focus,
     }
 }
 
 #[tauri::command]
-fn get_state(store: tauri::State<Store>) -> PetView {
-    aggregate(&store)
+fn get_view(store: tauri::State<Store>) -> AppView {
+    build_view(&store)
+}
+
+/// 前端量完内容后调这里改窗口大小。
+///
+/// 关键：**右边和底边都要锚定**，让窗口朝左上生长。挂件停在屏幕右下角，
+/// 按左上角改尺寸的话，变高会长出屏幕底部、变宽会冲出屏幕右缘 ——
+/// 折叠态的宠物点阵横向增长时尤其明显。
+#[tauri::command]
+fn resize_pet(app: AppHandle, width: f64, height: f64) -> Result<(), String> {
+    let win = app
+        .get_webview_window("pet")
+        .ok_or_else(|| "pet window missing".to_string())?;
+
+    // 先记下旧的右下角（物理像素）
+    let old_pos = win.outer_position().map_err(|e| e.to_string())?;
+    let old_size = win.outer_size().map_err(|e| e.to_string())?;
+    let right = old_pos.x + old_size.width as i32;
+    let bottom = old_pos.y + old_size.height as i32;
+
+    win.set_size(LogicalSize::new(width, height))
+        .map_err(|e| e.to_string())?;
+
+    // 改完再读实际尺寸，反算左上角让右下角回到原处
+    let new_size = win.outer_size().map_err(|e| e.to_string())?;
+    win.set_position(tauri::PhysicalPosition {
+        x: right - new_size.width as i32,
+        y: bottom - new_size.height as i32,
+    })
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
 }
 
 // ── HTTP 监听 ────────────────────────────────────────────────
@@ -233,7 +319,7 @@ fn spawn_server(app: AppHandle, store: Store) {
 
             if let Ok(v) = serde_json::from_str::<Value>(&body) {
                 handle_event(&store, &v);
-                let _ = app.emit("pet://state", aggregate(&store));
+                let _ = app.emit("pet://view", build_view(&store));
             }
 
             // 必须回 2xx 空 body —— 官方约定这等价于 exit 0 无输出，
@@ -245,31 +331,32 @@ fn spawn_server(app: AppHandle, store: Store) {
 
 // ── 窗口位置持久化 ───────────────────────────────────────────
 
+/// 存右下角而不是左上角 —— 和 resize_pet 的锚定方向保持一致。
 #[derive(Serialize, Deserialize)]
-struct SavedPos {
-    x: i32,
-    y: i32,
+struct SavedAnchor {
+    right: i32,
+    bottom: i32,
 }
 
-fn pos_file(app: &AppHandle) -> Option<PathBuf> {
+fn anchor_file(app: &AppHandle) -> Option<PathBuf> {
     app.path()
         .app_config_dir()
         .ok()
-        .map(|d| d.join("window-position.json"))
+        .map(|d| d.join("window-anchor.json"))
 }
 
-fn write_pos(app: &AppHandle, x: i32, y: i32) {
-    let Some(path) = pos_file(app) else { return };
+fn write_anchor(app: &AppHandle, right: i32, bottom: i32) {
+    let Some(path) = anchor_file(app) else { return };
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Ok(s) = serde_json::to_string(&SavedPos { x, y }) {
+    if let Ok(s) = serde_json::to_string(&SavedAnchor { right, bottom }) {
         let _ = std::fs::write(path, s);
     }
 }
 
-fn read_pos(app: &AppHandle) -> Option<SavedPos> {
-    let path = pos_file(app)?;
+fn read_anchor(app: &AppHandle) -> Option<SavedAnchor> {
+    let path = anchor_file(app)?;
     let s = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&s).ok()
 }
@@ -277,18 +364,14 @@ fn read_pos(app: &AppHandle) -> Option<SavedPos> {
 /// 保存的坐标必须落在某个「当前可用」的显示器里才能用。
 /// 笔记本插拔扩展屏后旧坐标会把挂件扔到看不见的地方 —— 那种情况下
 /// 用户只会以为程序坏了，因为窗口没有标题栏也不在任务栏，找不回来。
-fn position_is_visible(win: &WebviewWindow, x: i32, y: i32) -> bool {
+fn point_is_visible(win: &WebviewWindow, x: i32, y: i32) -> bool {
     let Ok(monitors) = win.available_monitors() else {
         return false;
     };
     monitors.iter().any(|m| {
         let p = m.position();
         let s = m.size();
-        // 留 8px 容差，避免贴边时的边界抖动
-        x >= p.x - 8
-            && y >= p.y - 8
-            && x < p.x + s.width as i32
-            && y < p.y + s.height as i32
+        x >= p.x - 8 && y >= p.y - 8 && x < p.x + s.width as i32 && y < p.y + s.height as i32
     })
 }
 
@@ -306,18 +389,22 @@ fn position_bottom_right(win: &WebviewWindow) {
 }
 
 fn restore_position(win: &WebviewWindow, app: &AppHandle) {
-    if let Some(saved) = read_pos(app) {
-        if position_is_visible(win, saved.x, saved.y) {
-            let _ = win.set_position(tauri::PhysicalPosition {
-                x: saved.x,
-                y: saved.y,
-            });
-            return;
+    if let Some(saved) = read_anchor(app) {
+        if let Ok(size) = win.outer_size() {
+            let x = saved.right - size.width as i32;
+            let y = saved.bottom - size.height as i32;
+            // 校验左上角和右下角都在屏幕内 —— 只查一个角的话，
+            // 换了分辨率后窗口可能一半在屏幕外
+            if point_is_visible(win, x, y) && point_is_visible(win, saved.right - 1, saved.bottom - 1)
+            {
+                let _ = win.set_position(tauri::PhysicalPosition { x, y });
+                return;
+            }
+            eprintln!(
+                "[claude-pet] saved anchor (right {}, bottom {}) is off-screen, using default",
+                saved.right, saved.bottom
+            );
         }
-        eprintln!(
-            "[claude-pet] saved position ({}, {}) is off-screen, using default",
-            saved.x, saved.y
-        );
     }
     position_bottom_right(win);
 }
@@ -340,8 +427,13 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     };
 
     // 版本项 enabled=false，纯展示 —— 想知道自己跑的是哪个版本
-    let version_item =
-        MenuItem::with_id(app, "version", format!("Claude Pet v{version}"), false, None::<&str>)?;
+    let version_item = MenuItem::with_id(
+        app,
+        "version",
+        format!("Claude Pet v{version}"),
+        false,
+        None::<&str>,
+    )?;
     let autostart_item =
         CheckMenuItem::with_id(app, "autostart", "开机自启", true, autostart_on, None::<&str>)?;
     let sep = PredefinedMenuItem::separator(app)?;
@@ -445,7 +537,7 @@ fn handle_autostart_cli(app: &tauri::App) -> Option<i32> {
 
 fn main() {
     let store: Store = Arc::new(Mutex::new(HashMap::new()));
-    let pos: PosState = Arc::new(Mutex::new(None));
+    let anchor: AnchorState = Arc::new(Mutex::new(None));
 
     tauri::Builder::default()
         .plugin(tauri_plugin_autostart::init(
@@ -454,10 +546,10 @@ fn main() {
             None,
         ))
         .manage(store.clone())
-        .invoke_handler(tauri::generate_handler![get_state])
+        .invoke_handler(tauri::generate_handler![get_view, resize_pet])
         .setup(move |app| {
-            // 无头开关自启：安装脚本要用，我也用它来验证 autostart 真的写了注册表。
-            // 必须从「安装后的」exe 调用 —— 插件注册的是当前 exe 的路径。
+            // 无头开关自启：安装脚本要用。必须从「安装后的」exe 调用 ——
+            // 插件注册的是当前 exe 的路径。
             if let Some(code) = handle_autostart_cli(app) {
                 std::process::exit(code);
             }
@@ -474,12 +566,18 @@ fn main() {
                 let _ = win.show();
                 let _ = win.set_always_on_top(true);
 
-                // 拖动时只记内存，不碰磁盘
-                let pos_for_move = pos.clone();
+                // 拖动时只记内存，不碰磁盘。存右下角，和 resize_pet 的锚定一致。
+                let anchor_for_move = anchor.clone();
+                let win_for_move = win.clone();
                 win.on_window_event(move |event| {
                     if let tauri::WindowEvent::Moved(p) = event {
-                        if let Ok(mut slot) = pos_for_move.lock() {
-                            *slot = Some((p.x, p.y));
+                        if let Ok(size) = win_for_move.outer_size() {
+                            if let Ok(mut slot) = anchor_for_move.lock() {
+                                *slot = Some((
+                                    p.x + size.width as i32,
+                                    p.y + size.height as i32,
+                                ));
+                            }
                         }
                     }
                 });
@@ -487,9 +585,9 @@ fn main() {
                 // 一个后台线程干两件事：
                 //  1. 重新抬升置顶 —— Windows 上独占全屏程序和 UAC 安全桌面会抢走
                 //     topmost。set_always_on_top 是幂等的，不抢焦点。
-                //  2. 落盘位置 —— 只在变化时写，最多丢 5 秒内的移动。
+                //  2. 落盘锚点 —— 只在变化时写，最多丢 5 秒内的移动。
                 let w = win.clone();
-                let pos_for_flush = pos.clone();
+                let anchor_for_flush = anchor.clone();
                 let app_for_flush = handle.clone();
                 std::thread::spawn(move || {
                     let mut last_written: Option<(i32, i32)> = None;
@@ -497,11 +595,11 @@ fn main() {
                         std::thread::sleep(Duration::from_secs(5));
                         let _ = w.set_always_on_top(true);
 
-                        let current = pos_for_flush.lock().ok().and_then(|g| *g);
-                        if let Some((x, y)) = current {
-                            if last_written != Some((x, y)) {
-                                write_pos(&app_for_flush, x, y);
-                                last_written = Some((x, y));
+                        let current = anchor_for_flush.lock().ok().and_then(|g| *g);
+                        if let Some((right, bottom)) = current {
+                            if last_written != Some((right, bottom)) {
+                                write_anchor(&app_for_flush, right, bottom);
+                                last_written = Some((right, bottom));
                             }
                         }
                     }
