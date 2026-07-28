@@ -1,0 +1,21 @@
+# Rust 构建产物 —— 体积巨大，绝不能提交
+/src-tauri/target/
+
+# tauri-build 生成的 schema，每次构建重新产出
+/src-tauri/gen/schemas/
+
+# Cargo.lock 刻意不忽略：这是二进制应用不是库，锁版本才能复现构建
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+*~
+
+# Windows / macOS 垃圾文件
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Claude Code 本地设置（个人的，不该共享）
+.claude/settings.local.json
