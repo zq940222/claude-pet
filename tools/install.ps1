@@ -1,16 +1,23 @@
-﻿# Claude Pet 一键安装。
+# Claude Pet installer.
 #
 #   irm https://raw.githubusercontent.com/zq940222/claude-pet/main/tools/install.ps1 | iex
 #
-# 想带参数（irm | iex 传不了参数，得用 scriptblock 形式）：
+# With arguments (irm | iex cannot pass parameters, so use the scriptblock form):
 #
 #   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/zq940222/claude-pet/main/tools/install.ps1))) -Autostart
 #
-# 参数：
-#   -Autostart     装完就开启开机自启
-#   -Version x.y.z 装指定版本，默认最新
-#   -NoLaunch      装完不启动
-#   -Uninstall     卸载（停进程、关自启、删文件和快捷方式）
+# Parameters:
+#   -Autostart      enable start-with-Windows after installing
+#   -Version x.y.z  install a specific version (default: latest)
+#   -NoLaunch       do not start the widget after installing
+#   -Uninstall      stop it, disable autostart, remove files and shortcut
+#
+# NOTE TO MAINTAINERS: this file must stay pure ASCII with NO byte-order mark.
+# It is fetched over HTTP and handed to iex / [scriptblock]::Create, and a
+# leading U+FEFF from a BOM counts as a statement, which makes param() no
+# longer the first statement and breaks parsing with
+# "Unexpected attribute 'CmdletBinding'". Keep comments English so no BOM is
+# needed for Windows PowerShell 5.1 to decode the file correctly.
 
 [CmdletBinding()]
 param(
@@ -22,7 +29,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$Repo      = 'zq940222/claude-pet'
+$Repo       = 'zq940222/claude-pet'
 $InstallDir = Join-Path $env:LOCALAPPDATA 'ClaudePet'
 $ExePath    = Join-Path $InstallDir 'claude-pet.exe'
 $StartMenu  = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Claude Pet.lnk'
@@ -41,28 +48,29 @@ function Stop-Pet {
     }
 }
 
-# ── 卸载 ─────────────────────────────────────────────────────
+# -- Uninstall ------------------------------------------------
 
 if ($Uninstall) {
     if (Test-Path $ExePath) {
         Step 'disabling autostart'
-        # stderr 丢掉：WebView 退出时会打一行无害的 unregister class 报错
+        # Discard stderr: on this path the WebView prints a harmless
+        # "Failed to unregister class Chrome_WidgetWin_0" as the process exits.
         & $ExePath --disable-autostart 2>$null | Out-Null
     }
     Stop-Pet
-    if (Test-Path $StartMenu)  { Remove-Item $StartMenu -Force;            Ok 'removed Start Menu shortcut' }
-    if (Test-Path $InstallDir) { Remove-Item $InstallDir -Recurse -Force;  Ok "removed $InstallDir" }
-    Warn "config kept at $env:APPDATA\com.opsmateai.claude-pet (delete manually if you want)"
-    Warn "hooks kept in ~/.claude/settings.json (remove the 127.0.0.1:47800 entries yourself)"
+    if (Test-Path $StartMenu)  { Remove-Item $StartMenu -Force;           Ok 'removed Start Menu shortcut' }
+    if (Test-Path $InstallDir) { Remove-Item $InstallDir -Recurse -Force; Ok "removed $InstallDir" }
+    Warn "config kept at $env:APPDATA\com.opsmateai.claude-pet (delete it yourself if you want)"
+    Warn 'hooks kept in ~/.claude/settings.json (remove the 127.0.0.1:47800 entries yourself)'
     Ok 'uninstalled'
     return
 }
 
-# ── 找 release ───────────────────────────────────────────────
+# -- Locate the release ---------------------------------------
 
 Step 'looking up release'
 
-# GitHub API 要求带 UA，否则 403
+# The GitHub API rejects requests without a User-Agent.
 $headers = @{ 'User-Agent' = 'claude-pet-installer'; 'Accept' = 'application/vnd.github+json' }
 $apiUrl = if ($Version) {
     "https://api.github.com/repos/$Repo/releases/tags/v$Version"
@@ -82,7 +90,7 @@ if (-not $asset) { Die "release $tag has no *windows-x64.zip asset" }
 
 Step "installing $tag  ($($asset.name), $([math]::Round($asset.size/1MB,2)) MB)"
 
-# ── 下载并解压 ───────────────────────────────────────────────
+# -- Download and extract -------------------------------------
 
 $tmpZip = Join-Path $env:TEMP $asset.name
 $ProgressPreference = 'SilentlyContinue'
@@ -100,7 +108,7 @@ Remove-Item $tmpZip -Force -ErrorAction SilentlyContinue
 if (-not (Test-Path $ExePath)) { Die "expected $ExePath after extraction" }
 Ok "installed to $InstallDir"
 
-# ── 开始菜单快捷方式 ─────────────────────────────────────────
+# -- Start Menu shortcut --------------------------------------
 
 $shell = New-Object -ComObject WScript.Shell
 $lnk = $shell.CreateShortcut($StartMenu)
@@ -110,18 +118,19 @@ $lnk.Description = 'Claude Code status widget'
 $lnk.Save()
 Ok 'created Start Menu shortcut'
 
-# ── 自启 ─────────────────────────────────────────────────────
+# -- Autostart ------------------------------------------------
 
 if ($Autostart) {
     Step 'enabling autostart'
-    # 必须用「装好的」exe 调用 —— 插件写进注册表的是当前 exe 的路径
+    # Must be invoked from the INSTALLED exe: the plugin records the path of
+    # whichever binary makes the call.
     & $ExePath --enable-autostart 2>$null | Out-Null
     if ($LASTEXITCODE -eq 0) { Ok 'autostart enabled' } else { Warn 'autostart could not be enabled' }
 } else {
     Warn 'autostart not enabled (pass -Autostart, or use the tray menu)'
 }
 
-# ── 启动 ─────────────────────────────────────────────────────
+# -- Launch ---------------------------------------------------
 
 if (-not $NoLaunch) {
     Start-Process -FilePath $ExePath -WorkingDirectory $InstallDir
@@ -129,11 +138,11 @@ if (-not $NoLaunch) {
     if (Get-Process claude-pet -ErrorAction SilentlyContinue) {
         Ok 'running (look at the bottom-right of your screen)'
     } else {
-        Warn 'launched but process not found -- check WebView2 Runtime is installed'
+        Warn 'launched but process not found -- check the WebView2 Runtime is installed'
     }
 }
 
-# ── 提示接 hook ──────────────────────────────────────────────
+# -- Tell them about the hooks --------------------------------
 
 Write-Host ''
 Write-Host 'One more step: the widget only lights up once Claude Code posts events to it.' -ForegroundColor Yellow
@@ -149,5 +158,5 @@ Write-Host ''
   "SessionEnd":       [ { "hooks": [ { "type": "http", "url": "http://127.0.0.1:47800/", "async": true, "timeout": 5 } ] } ]
 '@
 Write-Host ''
-Write-Host 'Hooks load at session start, so open a NEW Claude Code session to see it work.' -ForegroundColor Yellow
-Write-Host 'Uninstall:  & ([scriptblock]::Create((irm https://raw.githubusercontent.com/zq940222/claude-pet/main/tools/install.ps1))) -Uninstall'
+Write-Host 'Uninstall:' -ForegroundColor Yellow
+Write-Host '  & ([scriptblock]::Create((irm https://raw.githubusercontent.com/zq940222/claude-pet/main/tools/install.ps1))) -Uninstall'
