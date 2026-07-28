@@ -48,14 +48,29 @@ function Stop-Pet {
     }
 }
 
+# Run claude-pet.exe with a flag and return its exit code.
+#
+# Do NOT write `& $exe --flag 2>$null` here. In Windows PowerShell 5.1,
+# redirecting a native command's stderr wraps every stderr line in a
+# NativeCommandError ErrorRecord and sets $? to false even when the exe exits
+# 0 -- and with $ErrorActionPreference = 'Stop' that aborts this script. The
+# exe does print a harmless "Failed to unregister class Chrome_WidgetWin_0" on
+# these paths, so the noise does need to go somewhere; Start-Process redirects
+# it out of band to a file without any ErrorRecord wrapping.
+function Invoke-PetExe([string]$Flag) {
+    $errFile = Join-Path $env:TEMP 'claude-pet-install.err'
+    $proc = Start-Process -FilePath $ExePath -ArgumentList $Flag `
+        -RedirectStandardError $errFile -WindowStyle Hidden -PassThru -Wait
+    Remove-Item $errFile -Force -ErrorAction SilentlyContinue
+    return $proc.ExitCode
+}
+
 # -- Uninstall ------------------------------------------------
 
 if ($Uninstall) {
     if (Test-Path $ExePath) {
         Step 'disabling autostart'
-        # Discard stderr: on this path the WebView prints a harmless
-        # "Failed to unregister class Chrome_WidgetWin_0" as the process exits.
-        & $ExePath --disable-autostart 2>$null | Out-Null
+        $null = Invoke-PetExe '--disable-autostart'
     }
     Stop-Pet
     if (Test-Path $StartMenu)  { Remove-Item $StartMenu -Force;           Ok 'removed Start Menu shortcut' }
@@ -124,8 +139,11 @@ if ($Autostart) {
     Step 'enabling autostart'
     # Must be invoked from the INSTALLED exe: the plugin records the path of
     # whichever binary makes the call.
-    & $ExePath --enable-autostart 2>$null | Out-Null
-    if ($LASTEXITCODE -eq 0) { Ok 'autostart enabled' } else { Warn 'autostart could not be enabled' }
+    if ((Invoke-PetExe '--enable-autostart') -eq 0) {
+        Ok 'autostart enabled'
+    } else {
+        Warn 'autostart could not be enabled'
+    }
 } else {
     Warn 'autostart not enabled (pass -Autostart, or use the tray menu)'
 }
