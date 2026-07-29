@@ -25,10 +25,13 @@ const el = {
   dHead: document.getElementById("dHead"),
   dProj: document.getElementById("dProj"),
   dDetail: document.getElementById("dDetail"),
+  actions: document.getElementById("actions"),
+  allow: document.getElementById("allow"),
+  deny: document.getElementById("deny"),
 };
 
 const app = {
-  view: { workspaces: [], total: 0, waiting: 0, focus: null },
+  view: { workspaces: [], total: 0, waiting: 0, focus: null, pending: [] },
   selected: null,
   expanded: false,
   /// null = 跟着自动规则；true = 用户按住开着；false = 用户按住关着
@@ -257,6 +260,15 @@ function renderDetail(view) {
 
   el.detail.classList.remove(...KNOWN_STATES.map((s) => `state-${s}`));
 
+  // 这个会话有挂起的权限请求吗？有就给出允许/拒绝按钮。
+  const pending = (view.pending || []).find(
+    (p) => current && p.session_id === current.id
+  );
+  el.actions.hidden = !pending;
+  el.allow.disabled = false;
+  el.deny.disabled = false;
+  app.pendingId = pending ? pending.id : null;
+
   if (!current) {
     el.detail.classList.add("state-idle");
     el.dHead.textContent = "空闲";
@@ -341,6 +353,26 @@ async function init() {
     e.stopPropagation();
     toggleExpanded();
   });
+
+  // 权限请求：点一次就把按钮禁掉，避免连点重复提交 ——
+  // 那条 HTTP 请求只能被决定一次，第二次调用会拿到「已经不在了」的错误。
+  for (const [node, allow] of [
+    [el.allow, true],
+    [el.deny, false],
+  ]) {
+    node.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const id = app.pendingId;
+      if (id == null || !app.invoke) return;
+      el.allow.disabled = true;
+      el.deny.disabled = true;
+      try {
+        await app.invoke("resolve_permission", { id, allow });
+      } catch (err) {
+        flash(String(err), true);
+      }
+    });
+  }
 
   try {
     await tauri.event.listen("pet://view", (e) => onView(e.payload));

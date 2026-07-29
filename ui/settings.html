@@ -108,6 +108,18 @@
           写入 <code id="claudeSettings"></code>。改动前会备份，只增删指向本挂件端口的条目，
           其它配置不动。<strong>hook 在会话启动时加载，所以要开一个新的 Claude Code 会话才生效。</strong>
         </p>
+
+        <label class="row">
+          <span class="label">在挂件上批准权限</span>
+          <input type="checkbox" id="permOn" />
+        </label>
+        <label class="row">
+          <span class="label">拦截哪些工具</span>
+          <span class="control">
+            <input type="text" id="permMatcher" class="accel" spellcheck="false" placeholder="Bash" />
+          </span>
+        </label>
+        <p class="hint" id="permHint"></p>
       </section>
 
       <section class="group">

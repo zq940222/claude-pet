@@ -33,6 +33,15 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 /// 挂件监听端口。改这里的话记得同步改 ~/.claude/settings.json 里的 hook url。
 const PORT: u16 = 47800;
 
+/// 权限请求最多挂住多久等你点。
+///
+/// 必须**短于** hook 配置里的 `timeout`（我们装的是 40 秒），否则 Claude Code
+/// 先放弃、我们的回复到得太晚就白挂了。
+///
+/// 超时后回空 200 = 不给决定，交还给 Claude Code 自己的权限流程（fail-open）。
+/// 所以最坏情况是每次卡 30 秒，而不是永久卡死 —— 这也是为什么不敢把它设得更长。
+const PERMISSION_WAIT: Duration = Duration::from_secs(30);
+
 // ── 会话状态 ─────────────────────────────────────────────────
 
 /// 派生 `Deserialize` 是为了跨启动持久化（见 `persist` 模块）——
@@ -76,12 +85,43 @@ struct AppView {
     waiting: usize,
     /// 最该被关注的会话 id。前端用它做自动选中和自动展开判断。
     focus: Option<String>,
+    /// 等着你点允许/拒绝的请求。空数组表示没有。
+    pending: Vec<PendingView>,
 }
 
 type Store = Arc<Mutex<HashMap<String, Session>>>;
 
 /// 用户偏好。托盘改它、HTTP 线程读它，所以要共享。
 type PrefsState = Arc<Mutex<persist::Prefs>>;
+
+/// 一条挂起的权限请求。
+///
+/// `tx` 是那条被挂住的 HTTP 请求线程在等的通道；前端点了允许/拒绝之后
+/// 往它发一个 bool，那边就能构造响应体返回给 Claude Code。
+struct Pending {
+    id: u64,
+    session_id: String,
+    project: String,
+    tool: String,
+    detail: String,
+    tx: std::sync::mpsc::Sender<bool>,
+}
+
+type PendingState = Arc<Mutex<Vec<Pending>>>;
+
+/// 挂起请求的 id。用原子计数器而不是随机数 —— 不需要不可预测性，
+/// 只需要在进程生命周期内唯一。
+static NEXT_PENDING_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// 前端看到的挂起请求（不含通道）。
+#[derive(Clone, Debug, Serialize)]
+struct PendingView {
+    id: u64,
+    session_id: String,
+    project: String,
+    tool: String,
+    detail: String,
+}
 
 /// 窗口右下角锚点 (right, bottom)。折叠/展开会同时改宽高，存左上角的话
 /// 挂件每次重启会按当时的折叠状态上下左右漂移。恢复时反算左上角。
@@ -121,6 +161,27 @@ fn project_of(cwd: &str) -> String {
     }
 }
 
+/// 「工具名: 关键参数」。权限请求和 working 状态都要显示这个。
+fn tool_summary(v: &Value) -> String {
+    let tool = v.get("tool_name").and_then(Value::as_str).unwrap_or("工具");
+    // Bash 看 command，Edit/Write 看 file_path，其它退回 description
+    let extra = v
+        .get("tool_input")
+        .and_then(|i| {
+            i.get("command")
+                .or_else(|| i.get("file_path"))
+                .or_else(|| i.get("pattern"))
+                .or_else(|| i.get("description"))
+        })
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if extra.is_empty() {
+        tool.to_string()
+    } else {
+        format!("{tool}: {extra}")
+    }
+}
+
 /// 把 hook 事件翻译成 (状态, 详情)。返回 None 表示这个事件不改变状态。
 fn classify(v: &Value) -> Option<(String, String)> {
     let ev = v.get("hook_event_name").and_then(Value::as_str).unwrap_or("");
@@ -128,26 +189,7 @@ fn classify(v: &Value) -> Option<(String, String)> {
     match ev {
         "UserPromptSubmit" => Some(("working".into(), "思考中".into())),
 
-        "PreToolUse" | "PostToolUse" => {
-            let tool = v.get("tool_name").and_then(Value::as_str).unwrap_or("工具");
-            // Bash 看 command，Edit/Write 看 file_path，其它退回 description
-            let extra = v
-                .get("tool_input")
-                .and_then(|i| {
-                    i.get("command")
-                        .or_else(|| i.get("file_path"))
-                        .or_else(|| i.get("pattern"))
-                        .or_else(|| i.get("description"))
-                })
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let detail = if extra.is_empty() {
-                tool.to_string()
-            } else {
-                format!("{tool}: {extra}")
-            };
-            Some(("working".into(), detail))
-        }
+        "PreToolUse" | "PostToolUse" => Some(("working".into(), tool_summary(v))),
 
         "Notification" => {
             let t = v
@@ -236,13 +278,36 @@ fn empty_view() -> AppView {
         total: 0,
         waiting: 0,
         focus: None,
+        pending: Vec::new(),
     }
 }
 
-fn build_view(store: &Store) -> AppView {
+fn pending_views(pending: &PendingState) -> Vec<PendingView> {
+    pending
+        .lock()
+        .map(|list| {
+            list.iter()
+                .map(|p| PendingView {
+                    id: p.id,
+                    session_id: p.session_id.clone(),
+                    project: p.project.clone(),
+                    tool: p.tool.clone(),
+                    detail: p.detail.clone(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn build_view(store: &Store, pending: &PendingState) -> AppView {
+    let pending_list = pending_views(pending);
     let map = match store.lock() {
         Ok(m) => m,
-        Err(_) => return empty_view(),
+        Err(_) => {
+            let mut v = empty_view();
+            v.pending = pending_list;
+            return v;
+        }
     };
 
     // 按 first_seen 排 —— 宠物图标的顺序必须稳定
@@ -296,12 +361,34 @@ fn build_view(store: &Store) -> AppView {
         total: all.len(),
         waiting,
         focus,
+        pending: pending_list,
     }
 }
 
 #[tauri::command]
-fn get_view(store: tauri::State<Store>) -> AppView {
-    build_view(&store)
+fn get_view(store: tauri::State<Store>, pending: tauri::State<PendingState>) -> AppView {
+    build_view(&store, &pending)
+}
+
+/// 前端点了允许/拒绝。把决定送给那条挂住的 HTTP 请求线程。
+#[tauri::command]
+fn resolve_permission(
+    pending: tauri::State<PendingState>,
+    id: u64,
+    allow: bool,
+) -> Result<(), String> {
+    let tx = {
+        let mut list = pending.lock().map_err(|_| "pending lock poisoned")?;
+        // 取出并移除 —— 一条请求只能被决定一次
+        let idx = list
+            .iter()
+            .position(|p| p.id == id)
+            .ok_or("这条权限请求已经不在了（可能已超时）")?;
+        list.remove(idx).tx
+    };
+    // 对端可能已经因为超时退出了，那种情况 send 会失败，不算错误
+    let _ = tx.send(allow);
+    Ok(())
 }
 
 // ── 会话自动发现 ─────────────────────────────────────────────
@@ -342,7 +429,7 @@ fn merge_discovered(store: &Store, found: Vec<discover::Discovered>) -> usize {
 ///
 /// 改了时间窗设置后会再调一次：对这个设置来说，「立即生效」只能是
 /// 用新窗口重扫一遍，光改数字对已经建好的会话表没有任何影响。
-fn spawn_discovery(app: AppHandle, store: Store, window: Duration) {
+fn spawn_discovery(app: AppHandle, store: Store, pending: PendingState, window: Duration) {
     std::thread::spawn(move || {
         let home = app.path().home_dir().ok();
         let Some(dir) = discover::projects_dir(home) else {
@@ -365,9 +452,28 @@ fn spawn_discovery(app: AppHandle, store: Store, window: Duration) {
         );
 
         if added > 0 {
-            let _ = app.emit("pet://view", build_view(&store));
+            let _ = app.emit("pet://view", build_view(&store, &pending));
         }
     });
+}
+
+/// 装/卸「权限拦截」那条 hook。与普通的 6 条分开，必须显式开启 ——
+/// 它是**阻塞**的，装上之后匹配到的工具调用都要等你点，这个代价必须是自愿的。
+#[tauri::command]
+fn set_permission_hook(app: AppHandle, install: bool, matcher: String) -> Result<String, String> {
+    let report = if install {
+        hooks::install_permission(&app, matcher.trim())?
+    } else {
+        hooks::uninstall_permission(&app)?
+    };
+    Ok(if report.changed {
+        match report.backup {
+            Some(b) => format!("已更新，备份于 {}", b.display()),
+            None => "已更新".into(),
+        }
+    } else {
+        "无需改动".into()
+    })
 }
 
 /// 前端量完内容后调这里改窗口大小。
@@ -403,7 +509,109 @@ fn resize_pet(app: AppHandle, width: f64, height: f64) -> Result<(), String> {
 
 // ── HTTP 监听 ────────────────────────────────────────────────
 
-fn spawn_server(app: AppHandle, store: Store, prefs: PrefsState) {
+/// 处理一条挂起的权限请求。**跑在自己的线程里**，会阻塞到用户点了或超时。
+fn handle_permission(
+    app: AppHandle,
+    store: Store,
+    pending: PendingState,
+    req: tiny_http::Request,
+    body: String,
+) {
+    // 解析不了就当没这回事：回空 200 = 不给决定，交还 Claude Code 自己判断
+    let Ok(v) = serde_json::from_str::<Value>(&body) else {
+        let _ = req.respond(tiny_http::Response::empty(200));
+        return;
+    };
+
+    let session_id = v
+        .get("session_id")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let cwd = v.get("cwd").and_then(Value::as_str).unwrap_or("").to_string();
+    let project = project_of(&cwd);
+    let tool = v
+        .get("tool_name")
+        .and_then(Value::as_str)
+        .unwrap_or("工具")
+        .to_string();
+    let detail = tool_summary(&v);
+
+    // 让宠物变红。复用现有的 waiting-permission 状态，不另造一套视觉语言 ——
+    // 用户已经认识「红色 + ! + 呼吸」就是要他动手。
+    if let Ok(mut m) = store.lock() {
+        let now = now_ms();
+        let first_seen = m.get(&session_id).map(|s| s.first_seen).unwrap_or(now);
+        m.insert(
+            session_id.clone(),
+            Session {
+                cwd,
+                project: project.clone(),
+                state: "waiting-permission".into(),
+                detail: detail.clone(),
+                first_seen,
+                updated_ms: now,
+            },
+        );
+    }
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let id = NEXT_PENDING_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if let Ok(mut list) = pending.lock() {
+        list.push(Pending {
+            id,
+            session_id: session_id.clone(),
+            project,
+            tool,
+            detail: detail.clone(),
+            tx,
+        });
+    }
+    let _ = app.emit("pet://view", build_view(&store, &pending));
+
+    let decision = rx.recv_timeout(PERMISSION_WAIT);
+
+    // 无论怎么结束都要摘掉。超时那条路径 resolve_permission 没机会摘，
+    // 不清理的话挂件上会永远留着一个点不掉的按钮。
+    if let Ok(mut list) = pending.lock() {
+        list.retain(|p| p.id != id);
+    }
+
+    let response = match decision {
+        Ok(allow) => {
+            let (verdict, reason) = if allow {
+                ("allow", "用户在挂件上批准")
+            } else {
+                ("deny", "用户在挂件上拒绝")
+            };
+            eprintln!("[claude-pet] 权限请求 #{id} {verdict}: {detail}");
+            let payload = serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": verdict,
+                    "permissionDecisionReason": reason
+                }
+            })
+            .to_string();
+            let mut r = tiny_http::Response::from_string(payload);
+            if let Ok(h) = "Content-Type: application/json".parse::<tiny_http::Header>() {
+                r = r.with_header(h);
+            }
+            r.boxed()
+        }
+        Err(_) => {
+            // 超时 = 不给决定，交还给 Claude Code 自己的权限流程（fail-open）。
+            // 这是刻意的方向：挂件挂了或人不在，绝不能把 Claude Code 卡死。
+            eprintln!("[claude-pet] 权限请求 #{id} 超时，交回 Claude Code 处理");
+            tiny_http::Response::empty(200).boxed()
+        }
+    };
+
+    let _ = req.respond(response);
+    let _ = app.emit("pet://view", build_view(&store, &pending));
+}
+
+fn spawn_server(app: AppHandle, store: Store, prefs: PrefsState, pending: PendingState) {
     std::thread::spawn(move || {
         let server = match tiny_http::Server::http(("127.0.0.1", PORT)) {
             Ok(s) => s,
@@ -419,9 +627,23 @@ fn spawn_server(app: AppHandle, store: Store, prefs: PrefsState) {
             let mut body = String::new();
             let _ = req.as_reader().read_to_string(&mut body);
 
+            // /permission 是**阻塞**路径：要挂住等用户点。交给独立线程，
+            // 主循环继续处理别的事件 —— 不这么做的话一条权限请求会把所有
+            // 其它会话的状态更新堵住 30 秒。
+            //
+            // 反过来，普通事件刻意留在主循环里顺序处理：这样同一会话的
+            // 事件不会被线程调度打乱顺序（Stop 抢在它前面的 PreToolUse 之前）。
+            if req.url().starts_with("/permission") {
+                let app = app.clone();
+                let store = store.clone();
+                let pending = pending.clone();
+                std::thread::spawn(move || handle_permission(app, store, pending, req, body));
+                continue;
+            }
+
             if let Ok(v) = serde_json::from_str::<Value>(&body) {
                 let notify = handle_event(&store, &v);
-                let _ = app.emit("pet://view", build_view(&store));
+                let _ = app.emit("pet://view", build_view(&store, &pending));
 
                 if notify {
                     // 读不到偏好时按「静音」处理：宁可漏一声，也不要在用户
@@ -574,6 +796,9 @@ struct SettingsView {
     autostart: bool,
     hooks_installed: usize,
     hooks_total: usize,
+    /// 权限拦截 hook 装了没；装了就是它的 matcher。None = 没装。
+    permission_matcher: Option<String>,
+    permission_wait_secs: u64,
     about: AboutInfo,
 }
 
@@ -591,6 +816,8 @@ fn get_settings(app: AppHandle, prefs: tauri::State<PrefsState>) -> SettingsView
         autostart: app.autolaunch().is_enabled().unwrap_or(false),
         hooks_installed,
         hooks_total,
+        permission_matcher: hooks::permission_status(&app),
+        permission_wait_secs: PERMISSION_WAIT.as_secs(),
         about: AboutInfo {
             version: app.package_info().version.to_string(),
             config_dir: persist::config_path(&app, "")
@@ -638,7 +865,13 @@ fn apply_prefs(
 
     // 时间窗变了就用新窗口重扫一遍，这才叫「立即生效」
     if window_changed {
-        spawn_discovery(app.clone(), (*store).clone(), next.discover_window());
+        let pending: tauri::State<PendingState> = app.state();
+        spawn_discovery(
+            app.clone(),
+            (*store).clone(),
+            (*pending).clone(),
+            next.discover_window(),
+        );
     }
 
     // 快捷键注册失败只当警告返回：别因为一个键被占用就让其它设置也存不下去
@@ -893,6 +1126,43 @@ fn handle_open_cli(app: &tauri::App) -> Option<i32> {
 /// 约定与 autostart 那组一致：用退出码传结果。
 fn handle_hooks_cli(app: &tauri::App) -> Option<i32> {
     let args: Vec<String> = std::env::args().collect();
+    // 权限拦截 hook 单独一组：它是阻塞的，不该跟普通那 6 条混在一个开关里
+    if let Some(i) = args.iter().position(|a| a == "--install-permission-hook") {
+        let matcher = args.get(i + 1).map(String::as_str).unwrap_or("Bash");
+        return Some(match hooks::install_permission(app.handle(), matcher) {
+            Ok(r) => {
+                eprintln!(
+                    "[claude-pet] 权限拦截 hook 已装（matcher = {matcher}）{}",
+                    if r.changed { "" } else { "，无需改动" }
+                );
+                if let Some(b) = r.backup {
+                    eprintln!("[claude-pet] 备份: {}", b.display());
+                }
+                eprintln!("[claude-pet] 注意：匹配到的工具调用会挂住等你在挂件上点，最多 {} 秒后交回 Claude Code", PERMISSION_WAIT.as_secs());
+                0
+            }
+            Err(e) => {
+                eprintln!("[claude-pet] 装权限拦截 hook 失败: {e}");
+                1
+            }
+        });
+    }
+    if args.iter().any(|a| a == "--uninstall-permission-hook") {
+        return Some(match hooks::uninstall_permission(app.handle()) {
+            Ok(r) => {
+                eprintln!(
+                    "[claude-pet] 权限拦截 hook {}",
+                    if r.changed { "已卸载" } else { "本来没装" }
+                );
+                0
+            }
+            Err(e) => {
+                eprintln!("[claude-pet] 卸载权限拦截 hook 失败: {e}");
+                1
+            }
+        });
+    }
+
     let flag = args.iter().find(|a| {
         matches!(
             a.as_str(),
@@ -1048,6 +1318,7 @@ fn main() {
     // 真正的值在 setup 里从磁盘读 —— 那时才拿得到 AppHandle 来解析配置目录
     let prefs: PrefsState = Arc::new(Mutex::new(persist::Prefs::default()));
     let tray_state: TrayState = Arc::new(Mutex::new(None));
+    let pending: PendingState = Arc::new(Mutex::new(Vec::new()));
 
     tauri::Builder::default()
         .plugin(tauri_plugin_autostart::init(
@@ -1060,6 +1331,7 @@ fn main() {
         .manage(store.clone())
         .manage(prefs.clone())
         .manage(tray_state.clone())
+        .manage(pending.clone())
         .invoke_handler(tauri::generate_handler![
             get_view,
             resize_pet,
@@ -1068,6 +1340,8 @@ fn main() {
             set_autostart,
             preview_sound,
             set_hooks,
+            set_permission_hook,
+            resolve_permission,
             open_in_editor
         ])
         .setup(move |app| {
@@ -1190,8 +1464,8 @@ fn main() {
                 });
             }
 
-            spawn_server(handle.clone(), store.clone(), prefs.clone());
-            spawn_discovery(handle, store.clone(), window);
+            spawn_server(handle.clone(), store.clone(), prefs.clone(), pending.clone());
+            spawn_discovery(handle, store.clone(), pending.clone(), window);
             Ok(())
         })
         .run(tauri::generate_context!())

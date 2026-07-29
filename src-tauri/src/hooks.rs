@@ -22,6 +22,17 @@ use tauri::{AppHandle, Manager};
 /// 判重和卸载都以这个 url 为标识。改端口的话这里和 `PORT` 要一起改。
 const HOOK_URL: &str = "http://127.0.0.1:47800/";
 
+/// 权限拦截用**另一个路径**。
+///
+/// 这样「哪些工具调用要挂住等人点」完全由这条 hook 的 matcher 决定，
+/// 不需要在挂件里再存一份 pref —— 两处各存一份必然会不一致。
+/// 服务端只看 URL 路径就知道该走阻塞还是非阻塞路径。
+const PERMISSION_URL: &str = "http://127.0.0.1:47800/permission";
+
+/// hook 侧的超时必须**长于**挂件内部的等待（30 秒），
+/// 否则 Claude Code 先放弃，我们的回复到得太晚就白挂了。
+const PERMISSION_TIMEOUT: u32 = 40;
+
 /// 要装的事件和它们的 matcher。`None` 表示该事件不需要 matcher。
 ///
 /// `Notification` 的 matcher 覆盖四种通知类型 —— 挂件要靠 `idle_prompt` 和
@@ -71,6 +82,11 @@ fn our_hook() -> Value {
 fn is_ours(hook: &Value) -> bool {
     hook.get("type").and_then(Value::as_str) == Some("http")
         && hook.get("url").and_then(Value::as_str) == Some(HOOK_URL)
+}
+
+fn is_permission_hook(hook: &Value) -> bool {
+    hook.get("type").and_then(Value::as_str) == Some("http")
+        && hook.get("url").and_then(Value::as_str) == Some(PERMISSION_URL)
 }
 
 /// 序列化成与用户原文件同款的格式：2 空格 + 末尾换行。
@@ -256,6 +272,117 @@ pub fn uninstall(app: &AppHandle) -> Result<Report, String> {
 
     let (changed, backup) = commit(&path, &original, &root)?;
     Ok(Report { changed, touched, backup })
+}
+
+// ── 权限拦截 hook ────────────────────────────────────────────
+//
+// 与上面那 6 条彻底分开：它是**阻塞**的（`async` 必须缺省为 false），
+// 装上之后 matcher 匹配到的工具调用都要等用户在挂件上点。这个代价必须自愿。
+
+/// 装权限拦截 hook。`matcher` 为空时默认只拦 `Bash` ——
+/// 拿 `*` 当默认会让每一次工具调用都等人点，那不是「更安全」而是不可用。
+pub fn install_permission(app: &AppHandle, matcher: &str) -> Result<Report, String> {
+    let matcher = if matcher.is_empty() { "Bash" } else { matcher };
+
+    let path = settings_path(app).ok_or("cannot locate settings.json")?;
+    let (mut root, original) = read_root(&path)?;
+
+    let obj = root.as_object_mut().ok_or("settings root is not an object")?;
+    let hooks = obj
+        .entry("hooks".to_string())
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
+        .ok_or("settings.hooks exists but is not an object")?;
+
+    let entries = hooks
+        .entry("PreToolUse".to_string())
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or("settings.hooks.PreToolUse is not an array")?;
+
+    // 先摘掉自己的旧条目再装：这样改 matcher 是「替换」而不是「叠加」。
+    // 叠加的话两条都会命中，同一次工具调用要点两次。
+    entries.retain(|e| {
+        !e.get("hooks")
+            .and_then(Value::as_array)
+            .map(|hs| hs.iter().any(is_permission_hook))
+            .unwrap_or(false)
+    });
+
+    let mut entry = Map::new();
+    entry.insert("matcher".into(), json!(matcher));
+    entry.insert(
+        "hooks".into(),
+        json!([{
+            "type": "http",
+            "url": PERMISSION_URL,
+            // 刻意不写 async：这条必须是同步的，否则 Claude Code 不会等我们的决定
+            "timeout": PERMISSION_TIMEOUT
+        }]),
+    );
+    entries.push(Value::Object(entry));
+
+    let (changed, backup) = commit(&path, &original, &root)?;
+    Ok(Report { changed, touched: 1, backup })
+}
+
+pub fn uninstall_permission(app: &AppHandle) -> Result<Report, String> {
+    let path = settings_path(app).ok_or("cannot locate settings.json")?;
+    let (mut root, original) = read_root(&path)?;
+    if original.is_empty() {
+        return Ok(Report::default());
+    }
+
+    let mut touched = 0;
+    if let Some(entries) = root
+        .as_object_mut()
+        .and_then(|o| o.get_mut("hooks"))
+        .and_then(Value::as_object_mut)
+        .and_then(|h| h.get_mut("PreToolUse"))
+        .and_then(Value::as_array_mut)
+    {
+        for entry in entries.iter_mut() {
+            if let Some(hs) = entry.get_mut("hooks").and_then(Value::as_array_mut) {
+                let before = hs.len();
+                hs.retain(|h| !is_permission_hook(h));
+                touched += before - hs.len();
+            }
+        }
+        entries.retain(|e| {
+            e.get("hooks")
+                .and_then(Value::as_array)
+                .map(|hs| !hs.is_empty())
+                .unwrap_or(true)
+        });
+    }
+
+    let (changed, backup) = commit(&path, &original, &root)?;
+    Ok(Report { changed, touched, backup })
+}
+
+/// 权限拦截 hook 装了吗？装了的话 matcher 是什么。
+pub fn permission_status(app: &AppHandle) -> Option<String> {
+    let path = settings_path(app)?;
+    let (root, original) = read_root(&path).ok()?;
+    if original.is_empty() {
+        return None;
+    }
+    root.get("hooks")?
+        .get("PreToolUse")?
+        .as_array()?
+        .iter()
+        .find(|e| {
+            e.get("hooks")
+                .and_then(Value::as_array)
+                .map(|hs| hs.iter().any(is_permission_hook))
+                .unwrap_or(false)
+        })
+        .map(|e| {
+            e.get("matcher")
+                .and_then(Value::as_str)
+                .unwrap_or("*")
+                .to_string()
+        })
 }
 
 /// 返回 (已装事件数, 应装事件数)。

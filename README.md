@@ -158,6 +158,38 @@ claude-pet.exe --open D:\some\project
 
 **终端的 tab 级跳回不在这里** —— 那条在 Windows 上有结构性障碍（Windows Terminal 单 HWND 多 Tab），另有 issue 调研。
 
+## 在挂件上批准权限（默认关闭）
+
+开启后，Claude Code 请求工具权限时挂件上直接出现「允许 / 拒绝」，不用切回终端。
+
+**默认不开**，需要显式装一条额外的 hook：
+
+```bash
+claude-pet.exe --install-permission-hook          # 默认只拦 Bash
+claude-pet.exe --install-permission-hook 'Bash|Write'
+claude-pet.exe --uninstall-permission-hook
+```
+
+设置窗口的 Hooks 分组里也有开关。
+
+### 为什么用独立的 URL 路径
+
+拦截走 `http://127.0.0.1:47800/permission`，普通事件走 `/`。这样「哪些工具要挂住等人点」**完全由那条 hook 的 matcher 决定**，挂件里不用再存一份 pref —— 两处各存一份必然会不一致。服务端只看 URL 路径就知道走阻塞还是非阻塞。
+
+### 三个关键设计
+
+**只有 `/permission` 走独立线程。** 普通事件仍在主循环里顺序处理，这样同一会话的事件不会被线程调度打乱（`Stop` 抢在它前面的 `PreToolUse` 之前）。实测：一条权限请求挂住期间，普通事件的响应仍是 4–32ms。
+
+**超时 fail-open。** 内部最多等 30 秒，超时回空 200 = 不给决定，交还 Claude Code 自己的权限流程。所以挂件崩了或人不在时**绝不会把 Claude Code 卡死**，代价是每次多等 30 秒 —— 这也是不敢把它设更长的原因。hook 侧的 `timeout` 设成 40 秒，必须长于内部等待，否则 Claude Code 先放弃。
+
+**这条 hook 不能带 `async`。** `async: true` 是发射后不管，Claude Code 不会等我们的决定。装的时候刻意不写这个字段。
+
+### 注意
+
+`permissions.defaultMode` 为 `bypassPermissions` 时 Claude Code 本来就不问权限，这个功能不会触发。要用得先改回 `default`。
+
+matcher 填 `*` 会让**每一次**工具调用都等你点，通常不是你想要的，所以默认只拦 `Bash`。
+
 ## 全局快捷键
 
 | 默认 | 作用 |

@@ -19,6 +19,9 @@ const ui = {
   hooksStatus: el("hooksStatus"),
   installHooks: el("installHooks"),
   uninstallHooks: el("uninstallHooks"),
+  permOn: el("permOn"),
+  permMatcher: el("permMatcher"),
+  permHint: el("permHint"),
   claudeSettings: el("claudeSettings"),
   version: el("version"),
   port: el("port"),
@@ -128,6 +131,18 @@ function fill(v) {
 
   renderHooks(v.hooks_installed, v.hooks_total);
 
+  // 权限拦截：装了就是 Some(matcher)，没装是 null
+  const permMatcher = v.permission_matcher;
+  ui.permOn.checked = permMatcher !== null && permMatcher !== undefined;
+  ui.permMatcher.value = ui.permOn.checked ? permMatcher : "Bash";
+  ui.permMatcher.disabled = !ui.permOn.checked;
+  ui.permHint.innerHTML =
+    `匹配到的工具调用会<strong>挂住等你在挂件上点允许/拒绝</strong>，最多 ${v.permission_wait_secs} 秒后` +
+    `交回 Claude Code 自己的权限流程。所以挂件没开或人不在时不会把 Claude Code 卡死，` +
+    `代价是每次多等 ${v.permission_wait_secs} 秒。<br>` +
+    `默认只拦 <code>Bash</code>。填 <code>*</code> 会让每一次工具调用都等你点，通常不是你想要的。` +
+    `<br>另外：<code>permissions.defaultMode</code> 为 <code>bypassPermissions</code> 时 Claude Code 本来就不问权限，此功能不触发。`;
+
   ui.claudeSettings.textContent = v.about.claude_settings;
   ui.version.textContent = `v${v.about.version}`;
   ui.port.textContent = `127.0.0.1:${v.about.port}`;
@@ -197,6 +212,12 @@ function wire() {
 
   ui.installHooks.addEventListener("click", () => setHooks(true));
   ui.uninstallHooks.addEventListener("click", () => setHooks(false));
+
+  ui.permOn.addEventListener("change", () => setPermHook(ui.permOn.checked));
+  // 改 matcher 等于重装那条 hook（Rust 侧是先摘旧的再装，不会叠加）
+  ui.permMatcher.addEventListener("change", () => {
+    if (ui.permOn.checked) setPermHook(true);
+  });
 }
 
 /// Rust 会把越界的时间窗 clamp 掉，所以要回读一次让界面显示真实落盘的值 ——
@@ -206,6 +227,30 @@ async function refreshAfterClamp() {
     const v = await invoke("get_settings");
     prefs = v.prefs;
     ui.window.value = prefs.discover_window_minutes;
+  } catch (e) {
+    /* 保持现状 */
+  }
+}
+
+async function setPermHook(install) {
+  ui.permOn.disabled = true;
+  try {
+    const msg = await invoke("set_permission_hook", {
+      install,
+      matcher: ui.permMatcher.value.trim() || "Bash",
+    });
+    toast(msg);
+  } catch (e) {
+    toast(`失败: ${e}`, true);
+  }
+  ui.permOn.disabled = false;
+  // 回读真实状态，别让界面显示一个没落地的勾
+  try {
+    const v = await invoke("get_settings");
+    const m = v.permission_matcher;
+    ui.permOn.checked = m !== null && m !== undefined;
+    ui.permMatcher.value = ui.permOn.checked ? m : "Bash";
+    ui.permMatcher.disabled = !ui.permOn.checked;
   } catch (e) {
     /* 保持现状 */
   }

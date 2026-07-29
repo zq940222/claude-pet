@@ -498,6 +498,46 @@ body {
   gap: 3px;
 }
 
+/* ── 权限请求按钮 ───────────────────────────────────────── */
+
+.actions {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.act {
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 5px;
+  padding: 2px 9px;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  background: rgba(255, 255, 255, 0.08);
+  color: #dfe4ec;
+  transition: background 0.12s ease, border-color 0.12s ease;
+  white-space: nowrap;
+}
+
+.act:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.act-allow:hover:not(:disabled) {
+  background: rgba(63, 207, 112, 0.24);
+  border-color: rgba(63, 207, 112, 0.55);
+  color: #8ceaad;
+}
+
+.act-deny:hover:not(:disabled) {
+  background: rgba(255, 95, 86, 0.24);
+  border-color: rgba(255, 95, 86, 0.55);
+  color: #ff9d96;
+}
+
 .line-1 {
   font-size: 12.5px;
   font-weight: 600;
