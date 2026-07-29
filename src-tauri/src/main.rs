@@ -11,11 +11,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod discover;
+mod persist;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -29,7 +29,9 @@ const PORT: u16 = 47800;
 
 // ── 会话状态 ─────────────────────────────────────────────────
 
-#[derive(Clone, Debug)]
+/// 派生 `Deserialize` 是为了跨启动持久化（见 `persist` 模块）——
+/// 落盘的就是这个结构，改字段记得同步 `persist` 里的 `CACHE_VERSION`。
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct Session {
     project: String,
     state: String,
@@ -393,37 +395,9 @@ fn spawn_server(app: AppHandle, store: Store) {
     });
 }
 
-// ── 窗口位置持久化 ───────────────────────────────────────────
-
-/// 存右下角而不是左上角 —— 和 resize_pet 的锚定方向保持一致。
-#[derive(Serialize, Deserialize)]
-struct SavedAnchor {
-    right: i32,
-    bottom: i32,
-}
-
-fn anchor_file(app: &AppHandle) -> Option<PathBuf> {
-    app.path()
-        .app_config_dir()
-        .ok()
-        .map(|d| d.join("window-anchor.json"))
-}
-
-fn write_anchor(app: &AppHandle, right: i32, bottom: i32) {
-    let Some(path) = anchor_file(app) else { return };
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Ok(s) = serde_json::to_string(&SavedAnchor { right, bottom }) {
-        let _ = std::fs::write(path, s);
-    }
-}
-
-fn read_anchor(app: &AppHandle) -> Option<SavedAnchor> {
-    let path = anchor_file(app)?;
-    let s = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&s).ok()
-}
+// ── 窗口位置 ─────────────────────────────────────────────────
+//
+// 锚点的读写在 `persist` 模块，和会话缓存放一起。
 
 /// 保存的坐标必须落在某个「当前可用」的显示器里才能用。
 /// 笔记本插拔扩展屏后旧坐标会把挂件扔到看不见的地方 —— 那种情况下
@@ -453,7 +427,7 @@ fn position_bottom_right(win: &WebviewWindow) {
 }
 
 fn restore_position(win: &WebviewWindow, app: &AppHandle) {
-    if let Some(saved) = read_anchor(app) {
+    if let Some(saved) = persist::read_anchor(app) {
         if let Ok(size) = win.outer_size() {
             let x = saved.right - size.width as i32;
             let y = saved.bottom - size.height as i32;
@@ -623,6 +597,21 @@ fn main() {
 
             let handle = app.handle().clone();
 
+            // 缓存必须在 spawn_discovery 之前加载。
+            //
+            // 冲突解决就靠这个顺序：merge_discovered 会跳过已存在的 session_id，
+            // 所以先进来的缓存自动胜出。这是想要的方向 —— 缓存带着真实的状态和
+            // detail，而扫描只能确定「这个会话存在」，状态一律填 idle。
+            // 反过来的话，重启后所有宠物都会被扫描结果刷成灰色。
+            let restored = persist::load_sessions(&handle, discover::DEFAULT_WINDOW, now_ms());
+            let restored_count = restored.len();
+            if restored_count > 0 {
+                if let Ok(mut map) = store.lock() {
+                    map.extend(restored);
+                }
+            }
+            eprintln!("[claude-pet] session cache: {restored_count} restored");
+
             if let Some(win) = app.get_webview_window("pet") {
                 // 窗口在 config 里是 visible:false，先摆好位置再 show，
                 // 否则会先在默认位置闪一下再跳到恢复的位置。
@@ -646,24 +635,41 @@ fn main() {
                     }
                 });
 
-                // 一个后台线程干两件事：
+                // 一个后台线程干三件事：
                 //  1. 重新抬升置顶 —— Windows 上独占全屏程序和 UAC 安全桌面会抢走
                 //     topmost。set_always_on_top 是幂等的，不抢焦点。
                 //  2. 落盘锚点 —— 只在变化时写，最多丢 5 秒内的移动。
+                //  3. 落盘会话缓存 —— 同样「变了才写」，比较序列化后的字符串。
+                //     最多丢 5 秒内的状态变化，对「重启后接着看」够用了。
                 let w = win.clone();
                 let anchor_for_flush = anchor.clone();
+                let store_for_flush = store.clone();
                 let app_for_flush = handle.clone();
                 std::thread::spawn(move || {
-                    let mut last_written: Option<(i32, i32)> = None;
+                    let mut last_anchor: Option<(i32, i32)> = None;
+                    let mut last_sessions: Option<String> = None;
                     loop {
                         std::thread::sleep(Duration::from_secs(5));
                         let _ = w.set_always_on_top(true);
 
                         let current = anchor_for_flush.lock().ok().and_then(|g| *g);
                         if let Some((right, bottom)) = current {
-                            if last_written != Some((right, bottom)) {
-                                write_anchor(&app_for_flush, right, bottom);
-                                last_written = Some((right, bottom));
+                            if last_anchor != Some((right, bottom)) {
+                                persist::write_anchor(&app_for_flush, right, bottom);
+                                last_anchor = Some((right, bottom));
+                            }
+                        }
+
+                        // 先序列化再比较，避免没变化时白写一次磁盘。
+                        // 会话数是个位数，每 5 秒序列化一次的开销可以忽略。
+                        let encoded = store_for_flush
+                            .lock()
+                            .ok()
+                            .and_then(|m| persist::encode_sessions(&m));
+                        if let Some(json) = encoded {
+                            if last_sessions.as_deref() != Some(json.as_str()) {
+                                persist::write_sessions(&app_for_flush, &json);
+                                last_sessions = Some(json);
                             }
                         }
                     }
