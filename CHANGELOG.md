@@ -8,6 +8,7 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-29
 ### Added
 
 - **`LICENSE`：Apache-2.0**（#15）—— apache.org 的原文（11358 字节 / 202 行 / 9 条条款，已校验）。`Cargo.toml` 补上 `license` 和 `repository` 字段。本项目只参考了 Open Island（GPL v3）的功能设计、未移植其代码，因此不受 GPL 传染。
