@@ -49,6 +49,24 @@ Claude Code hooks (type: "http")
 | `idle` | `Notification` / `idle_prompt`、`Stop`、`SessionStart` | 灰色，闭眼 |
 | `done` | `Notification` / `agent_completed` | 绿色，笑眼 |
 
+## 会话自动发现
+
+挂件启动时会扫本地转录，把已经在跑的会话恢复出来 —— 否则开机自启后挂件是空的，要等下一个 hook 事件才冒出东西。
+
+```
+~/.claude/projects/<编码后的 cwd>/<session_id>.jsonl
+```
+
+文件名就是 `session_id`，mtime 是最后活动时间，**cwd 取自文件内容里的 `cwd` 字段**。不从目录名反解 cwd：目录名把 `:` 和 `\` 都替换成了 `-`，而项目名本身也可能含 `-`（`Claude-Code-Short-Drama-Studios`），反解无法唯一还原。
+
+只认最近 30 分钟内动过的转录 —— 本机有 651 个历史转录，不设窗口会一次冒出几十个早已关掉的会话。先按 mtime 过滤再决定开不开文件，所以扫描很便宜（实测 2–3ms）。
+
+只取项目目录下**直接**的 jsonl。subagent 的转录在 `<project>/<session_id>/subagents/` 更深一层，这条规则天然把它们排除，否则一个会话会显示成好几只宠物。
+
+恢复出来的会话一律是 `idle` 状态：转录能告诉我们会话存在，但告诉不了它此刻是在干活还是在等你。真实 hook 事件会在几秒内纠正过来，且**永远优先于**扫描结果。
+
+尊重 `CLAUDE_CONFIG_DIR` 环境变量。
+
 ## 一个会话 = 一只宠物，一个项目 = 一个工作空间
 
 `session_id` 唯一确定一只宠物；`cwd` 的末段作为工作空间名把宠物归组。宠物顺序按 `first_seen` 排 —— HashMap 的迭代顺序是随机的，不排序图标每次刷新都会乱跳。

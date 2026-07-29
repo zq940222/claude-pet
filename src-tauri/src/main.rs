@@ -10,6 +10,8 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod discover;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -264,6 +266,68 @@ fn build_view(store: &Store) -> AppView {
 #[tauri::command]
 fn get_view(store: tauri::State<Store>) -> AppView {
     build_view(&store)
+}
+
+// ── 会话自动发现 ─────────────────────────────────────────────
+
+/// 把扫到的会话并进 store，返回新增数量。
+///
+/// 真实 hook 事件优先：已经在表里的会话不覆盖 —— 事件带着准确的状态和 detail，
+/// 而扫描只能确定「这个会话存在」。
+fn merge_discovered(store: &Store, found: Vec<discover::Discovered>) -> usize {
+    let mut added = 0;
+    let Ok(mut map) = store.lock() else { return 0 };
+
+    for d in found {
+        if map.contains_key(&d.session_id) {
+            continue;
+        }
+        map.insert(
+            d.session_id,
+            Session {
+                project: project_of(&d.cwd),
+                // 状态只能是 idle：转录能告诉我们会话存在，但告诉不了它此刻
+                // 是在干活还是在等你。真实事件几秒内就会把它纠正过来。
+                state: "idle".into(),
+                detail: "恢复的会话".into(),
+                // 用 mtime 而不是 now，这样宠物顺序反映会话的实际活跃先后
+                first_seen: d.mtime_ms,
+                updated_ms: d.mtime_ms,
+            },
+        );
+        added += 1;
+    }
+    added
+}
+
+/// 后台线程里跑发现，扫完再 emit。不能放在 setup 的主路径上 ——
+/// 本机 54 个项目目录、651 个转录，扫描不该拖慢窗口出现。
+fn spawn_discovery(app: AppHandle, store: Store) {
+    std::thread::spawn(move || {
+        let home = app.path().home_dir().ok();
+        let Some(dir) = discover::projects_dir(home) else {
+            eprintln!("[claude-pet] cannot locate ~/.claude/projects, skipping discovery");
+            return;
+        };
+        if !dir.is_dir() {
+            eprintln!("[claude-pet] {} does not exist, skipping discovery", dir.display());
+            return;
+        }
+
+        let started = std::time::Instant::now();
+        let found = discover::scan(&dir, discover::DEFAULT_WINDOW);
+        let scanned = found.len();
+        let added = merge_discovered(&store, found);
+
+        eprintln!(
+            "[claude-pet] discovery: {scanned} recent session(s), {added} restored, took {}ms",
+            started.elapsed().as_millis()
+        );
+
+        if added > 0 {
+            let _ = app.emit("pet://view", build_view(&store));
+        }
+    });
 }
 
 /// 前端量完内容后调这里改窗口大小。
@@ -606,7 +670,8 @@ fn main() {
                 });
             }
 
-            spawn_server(handle, store.clone());
+            spawn_server(handle.clone(), store.clone());
+            spawn_discovery(handle, store.clone());
             Ok(())
         })
         .run(tauri::generate_context!())
