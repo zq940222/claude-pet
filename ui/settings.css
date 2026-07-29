@@ -79,6 +79,48 @@ label.row {
   gap: 8px;
 }
 
+/* agent 勾选列表：一行放不下四个带说明的条目，所以这一行改成上下堆叠。
+   其它行都是「标签在左、控件在右」，只有这里例外。 */
+.row-block {
+  display: block;
+}
+.row-block .label {
+  display: block;
+  margin-bottom: 6px;
+}
+.control-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: stretch;
+}
+.agent-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  padding: 2px 0;
+}
+.agent-row input {
+  flex: 0 0 auto;
+}
+.agent-name {
+  flex: 0 0 auto;
+  font-weight: 600;
+}
+/* 「没装」「一只宠物」「轮询」这类注记。用弱化的颜色 ——
+   它们是说明而不是警告，不该和 agent 名字抢注意力。 */
+.agent-note {
+  color: #7d8695;
+  font-size: 12px;
+}
+/* 没找到配置目录的 agent 仍然显示（藏起来的话，用户装完 Codex
+   会找不到开关在哪），但压暗，并且勾选框禁用。 */
+.agent-row.missing .agent-name {
+  color: #7d8695;
+  font-weight: 500;
+}
+
 .unit {
   color: #7d8695;
   font-size: 12px;

@@ -24,6 +24,11 @@
     "pet.sessions": "{n} 个会话",
     "pet.sessionsWaiting": "{n} 个会话 · {w} 个在等你",
     "pet.dblclickHint": "双击在编辑器中打开",
+    "pet.noProjectDir": "{agent} 是常驻服务，没有项目目录",
+    "agent.claude-code": "Claude Code",
+    "agent.codex": "Codex",
+    "agent.hermes": "Hermes",
+    "agent.openclaw": "OpenClaw",
     "pet.openedIn": "已在 {editor} 中打开",
     "pet.nothingWaiting": "没有会话在等你",
     "pet.allow": "允许",
@@ -44,6 +49,12 @@
     // ── 设置窗口 ──
     "set.title": "Claude Pet 设置",
     "set.general": "通用",
+    "set.agents": "盯哪些 agent",
+    "set.agentsHint":
+      "默认只开 Claude Code。<strong>只有 Claude Code 有 hook</strong>，状态是实时推送的；其余靠轮询本地文件，有几秒延迟。Hermes 和 OpenClaw 是常驻服务、没有项目概念，所以各自只有一只宠物、显示「在不在跑」。没装的灰掉但仍列出，装上之后开关就在这儿。",
+    "set.agentMissing": "本机没找到",
+    "set.agentGateway": "只有一只宠物",
+    "set.agentPolled": "轮询，有延迟",
     "set.autostart": "开机自启",
     "set.autostartHint":
       "注册到 <code>HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run</code>，记录的是当前 exe 的路径。",
@@ -130,6 +141,7 @@
     "what.shortcut": "快捷键",
     "what.lang": "语言",
     "what.position": "位置",
+    "what.agents": "agent 名单",
   },
 
   en: {
@@ -140,6 +152,11 @@
     "pet.sessions": "{n} sessions",
     "pet.sessionsWaiting": "{n} sessions · {w} waiting on you",
     "pet.dblclickHint": "Double-click to open in your editor",
+    "pet.noProjectDir": "{agent} is a long-running service, it has no project directory",
+    "agent.claude-code": "Claude Code",
+    "agent.codex": "Codex",
+    "agent.hermes": "Hermes",
+    "agent.openclaw": "OpenClaw",
     "pet.openedIn": "Opened in {editor}",
     "pet.nothingWaiting": "Nothing is waiting on you",
     "pet.allow": "Allow",
@@ -158,6 +175,12 @@
 
     "set.title": "Claude Pet Settings",
     "set.general": "General",
+    "set.agents": "Agents to watch",
+    "set.agentsHint":
+      "Only Claude Code by default. <strong>Only Claude Code has hooks</strong>, so its state is pushed live; the others are polled from local files and lag a few seconds. Hermes and OpenClaw are long-running services with no notion of a project, so each gets a single pet showing whether it is up. Ones that aren't installed stay listed but greyed out, so the switch is here once you do install them.",
+    "set.agentMissing": "not found",
+    "set.agentGateway": "one pet only",
+    "set.agentPolled": "polled, lags",
     "set.autostart": "Start with Windows",
     "set.autostartHint":
       "Registered under <code>HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run</code>, recording the path of the current exe.",
@@ -246,6 +269,7 @@
     "what.shortcut": "Shortcut",
     "what.lang": "Language",
     "what.position": "Position",
+    "what.agents": "agent list",
   },
 };
 

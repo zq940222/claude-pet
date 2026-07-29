@@ -108,6 +108,69 @@ Claude Code hooks (type: "http")
 
 过滤用的是每个会话自己的 `updated_ms` 而不是文件保存时间：挂件可能关了很久，缓存里既有几分钟前还活跃的会话，也有几小时前就停了的，不能因为文件「刚保存」就把后者当成当前状态。
 
+## 支持的 agent
+
+设置窗口 →「通用」→「盯哪些 agent」。**默认只开 Claude Code** —— 装这个挂件的人不一定装了另外三个，默认全开会让没装的人白付扫描开销，装了的人则突然多出一堆自己没要求盯的宠物。
+
+四个 agent 给的东西**不一样**，所以处理方式也不一样。这个不对称是实测数据决定的，不是偷懒：
+
+| agent | 形态 | 「在等我」信号 | cwd / 项目 |
+| --- | --- | --- | --- |
+| **Claude Code** | 交互式、按项目 | hook 实时推送 | 转录里就有 |
+| **Codex** | 交互式、按项目 | `task_started` / `task_complete`，**轮询** | `session_meta.cwd` |
+| **Hermes** | gateway + 20 多个聊天平台 | 无实时状态 | 22 条会话里只有 **2 条**有 cwd |
+| **OpenClaw** | gateway + 聊天入口 + cron | `status` 只是运行结果 | 恒为 gateway 自己的工作区 |
+
+于是分两类：
+
+- **Session 类**（Claude Code、Codex）—— 按 cwd 分工作空间，每个会话一只宠物，有真实的 working / waiting / idle 状态。
+- **Gateway 类**（Hermes、OpenClaw）—— 每个 agent **一只**宠物，放在以它自己命名的工作空间里，只回答「在不在跑」。没在跑时**不产出宠物**，而不是加一个 `offline` 状态：没在跑就没什么要盯的，一只常驻的灰色宠物只是在占地方。
+
+硬把 Hermes 做成一个会话一只宠物试过，撑不住：它的 `sessions` 表确实有 `cwd` / `git_repo_root` / `ended_at` 列，但本机 22 条里只有 2 条 `cwd` 非空、16 条 `ended_at` 永远是 null（CLI 不可靠地关会话），结果是一堆永远「在跑」、永远归不进项目的僵尸宠物。
+
+### 只有 Claude Code 有 hook，其余靠轮询
+
+- **Codex** 有 `notify` 配置，但那是 `config.toml` 里的**单个**槽位（一个数组，不是列表）。本机那格已经被 OpenAI 自己的 `codex-computer-use.exe` 占着，抢过来会弄坏用户已有的功能。
+- **Hermes / OpenClaw** 是常驻 gateway，本来就没有「一次会话结束」这种适合推事件的时机。
+
+所以有个 5 秒轮询线程。代价是这三个 agent 的状态有几秒延迟，设置界面里标了「轮询，有延迟」，免得被当成 bug。
+
+轮询**只在指纹变化时**才 emit（指纹 = 各会话的 id + state + detail，刻意不含 `updated_ms`）。无条件推的话前端每 5 秒重渲染一次，而重渲染会重新测量卡片并调 `resize_pet` —— 也就是每 5 秒动一次窗口。
+
+对轮询的 agent，扫描结果**会覆盖**已有状态；对 Claude Code 则不覆盖（hook 事件是权威）。这条区分是必须的：对 Codex 也「已存在就跳过」的话，宠物会永远停在第一次扫到的状态上，整个轮询白做。
+
+### Codex 的状态从文件尾部读
+
+`~/.codex/sessions/YYYY/MM/DD/rollout-<时间>-<uuid>.jsonl`，每行一条带 `type` 的记录。状态只看两个边界事件：
+
+| `event_msg` 的 `payload.type` | 我们的状态 |
+| --- | --- |
+| `task_started` | `working` |
+| `task_complete` | `idle`（轮到你） |
+
+语义和 Claude Code 的 `UserPromptSubmit` / `Stop` 一致，所以复用同一套状态名和视觉。**刻意不看** `agent_message` / `function_call` 之类 —— 那些在一轮里出现几十次，拿它们判断状态等于把「刚说完一句话」误当成「结束了」。
+
+从尾部回读 64KB。单条 `response_item` 可能很大（工具输出），只读几行的量会错过边界事件。回读窗口里找不到边界事件时返回「状态未知」并回落 `idle`，**不猜** —— 猜错方向会让「在等你」的宠物显示成「在干活」，那正好是这个挂件要解决的问题的反面。
+
+尊重 `CODEX_HOME`。
+
+### Gateway 的判活方式不一样，因为它们给的东西不一样
+
+- **OpenClaw** 在 `openclaw.json` 里配了 `gateway.port`（`bind: loopback`），裸 TCP 连一下就是确定性判活。**刻意不读同一段里的 `gateway.auth.token`** —— 建立 TCP 连接不需要认证，把用户的 token 读进内存是完全多余的暴露面。
+- **Hermes** 没有端口配置，但 `gateway_state.json` 有 `pid`、`gateway_state`、`active_agents` 和每个平台的连接状态，所以查那个 pid 还在不在。
+
+pid 判活的已知弱点：pid 会被系统回收，理论上可能有别的进程占了同一个号，导致虚报「在跑」。所以额外要求 `gateway_state` 字段自己也说 `running`。代价是可能虚报而不是漏报 —— 对一只状态挂件，虚报「在跑」比虚报「没跑」轻。
+
+尊重 `HERMES_HOME` / `OPENCLAW_CONFIG_DIR`。
+
+### 视觉上怎么区分
+
+**agent 走边框样式，不走颜色。** 颜色整条通道已经被状态占满了（红 = 要你动手），拿它再表达 agent 会让两种含义打架。实线 = Claude Code，虚线 = Codex，双线 = gateway。`border-style` 不改变盒模型尺寸，所以不会牵动那套「量卡片得出窗口尺寸」的逻辑。
+
+折叠态的 mini 点**刻意不区分**：11px 上任何形状差异都不可读，而折叠条要回答的问题只有「有没有红的」。agent 身份在展开态、tooltip 和详情行里都有。
+
+gateway 宠物没有项目目录（`cwd` 是空串），双击跳回编辑器会被拦住并提示，而不是去调用 `open_in_editor` 然后报一个看不懂的错。
+
 ## 一个会话 = 一只宠物，一个项目 = 一个工作空间
 
 `session_id` 唯一确定一只宠物；`cwd` 的末段作为工作空间名把宠物归组。宠物顺序按 `first_seen` 排 —— HashMap 的迭代顺序是随机的，不排序图标每次刷新都会乱跳。

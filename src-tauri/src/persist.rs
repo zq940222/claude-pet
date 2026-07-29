@@ -18,7 +18,12 @@ use tauri::{AppHandle, Manager};
 ///
 /// v2: `Session` 增加了 `cwd`（跳回 IDE 需要完整路径）。v1 的缓存里没有这个
 /// 字段，加载后会是空串、双击跳不动，所以宁可整份丢掉重新扫。
-const CACHE_VERSION: u32 = 2;
+///
+/// v3: `Session` 增加了 `agent`。v2 的缓存全是 Claude Code 的会话，虽然
+/// `#[serde(default)]` 能把它们都当成 Claude Code 从而「读得进来」，但那样会
+/// 让缓存里的旧会话和新扫到的 Codex 会话混在一起，而 gateway 宠物的清理逻辑
+/// （`retain`）依赖 `agent` 字段准确。宁可整份丢掉重扫 —— 反正一秒就扫完。
+const CACHE_VERSION: u32 = 3;
 
 const SESSIONS_FILE: &str = "sessions.json";
 const ANCHOR_FILE: &str = "window-anchor.json";
@@ -151,6 +156,13 @@ pub struct Prefs {
     /// 前两个是**吸附**模式，拖动不留痕；`free` 才记住拖动位置。
     #[serde(default = "default_position_mode")]
     pub position_mode: String,
+    /// 盯哪些 agent。存的是 `Agent::key()` 的字符串。
+    ///
+    /// 默认**只开 Claude Code**。这是个 Claude Code 挂件，装了它的人不一定装了
+    /// 另外三个；默认全开会让没装的人白付一份扫描开销，装了的人则会突然多出
+    /// 一堆自己没要求盯的宠物。
+    #[serde(default = "default_agents")]
+    pub agents: Vec<String>,
 }
 
 fn default_true() -> bool {
@@ -167,6 +179,10 @@ fn default_lang() -> String {
 
 fn default_position_mode() -> String {
     "bottom-right".to_string()
+}
+
+fn default_agents() -> Vec<String> {
+    vec![crate::agent::Agent::ClaudeCode.key().to_string()]
 }
 
 /// 合法的摆放模式。刘海 overlay 在 Windows 上不存在，`top-center` 是它的等价物。
@@ -205,6 +221,7 @@ impl Default for Prefs {
             lang: default_lang(),
             check_updates: true,
             position_mode: default_position_mode(),
+            agents: default_agents(),
         }
     }
 }
@@ -233,6 +250,26 @@ impl Prefs {
         if !POSITION_MODES.contains(&self.position_mode.as_str()) {
             self.position_mode = default_position_mode();
         }
+
+        // 丢掉认不出的 key，去重，并保持 Agent::ALL 的顺序 ——
+        // 顺序稳定是为了 prefs.json 的 diff 好看，也让设置界面里的
+        // 勾选顺序不会因为用户点击的先后而变。
+        let kept: Vec<String> = crate::agent::Agent::ALL
+            .iter()
+            .filter(|a| self.agents.iter().any(|s| s == a.key()))
+            .map(|a| a.key().to_string())
+            .collect();
+        // 全部非法（或空）时回落到默认，而不是留一个谁都不盯的挂件 ——
+        // 那样界面上什么都不会出现，用户只会以为程序坏了。
+        self.agents = if kept.is_empty() { default_agents() } else { kept };
+    }
+
+    /// 启用的 agent，解析成枚举。
+    pub fn enabled_agents(&self) -> Vec<crate::agent::Agent> {
+        self.agents
+            .iter()
+            .filter_map(|s| crate::agent::Agent::parse(s))
+            .collect()
     }
 
     pub fn resolved_lang(&self) -> crate::i18n::Lang {

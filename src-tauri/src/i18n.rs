@@ -78,6 +78,11 @@ strings! {
     session_started => "会话开始",      "Session started";
     restored        => "恢复的会话",    "Restored session";
     tool_fallback   => "工具",          "tool";
+
+    // gateway 类 agent（Hermes / OpenClaw）的 detail。
+    // 它们没有 hook，detail 是探测时现拼的，所以也得走这里 ——
+    // 第一版硬编码了中文，英文界面下会混进中文。
+    gateway_up      => "gateway 在跑",  "gateway up";
     // 「没有活动会话」这类空状态文案刻意不放这里 —— 那是前端自己渲染的，
     // Rust 侧的 AppView 在没会话时压根不带任何文案。
 
@@ -89,4 +94,12 @@ strings! {
 
     // 设置窗口的标题栏。这个由 WebviewWindowBuilder 定，改不了 document.title
     window_settings => "Claude Pet 设置",    "Claude Pet Settings";
+}
+
+/// 「N 个 agent 在跑」。带数字所以不能进 `strings!`（那个宏只处理静态串）。
+pub fn gateway_active(lang: Lang, n: u64) -> String {
+    match lang {
+        Lang::Zh => format!("{n} 个 agent 在跑"),
+        Lang::En => format!("{n} agent(s) running"),
+    }
 }

@@ -21,6 +21,7 @@
 //! 覆盖率不够，回退路径无论如何都得写。而我们本来就先按 mtime 过滤、只读那几个
 //! 近期文件（读几行很便宜），索引省下的开销不抵多一条代码路径的维护成本。
 
+use crate::agent::{Agent, Discovered};
 use serde_json::Value;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
@@ -35,13 +36,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// 最大的转录有 30MB，不设上限会把它整个读进来。
 const MAX_HEAD_BYTES: u64 = 256 * 1024;
 const MAX_HEAD_LINES: usize = 40;
-
-#[derive(Debug)]
-pub struct Discovered {
-    pub session_id: String,
-    pub cwd: String,
-    pub mtime_ms: u128,
-}
 
 /// `~/.claude/projects`，尊重 `CLAUDE_CONFIG_DIR` 覆盖。
 ///
@@ -154,8 +148,16 @@ fn read_head(path: &Path, stem: &str, mtime_ms: u128) -> Option<Discovered> {
 
     // 内容里的 sessionId 是权威值，缺失时退回文件名。
     Some(Discovered {
+        agent: Agent::ClaudeCode,
         session_id: session_id.unwrap_or_else(|| stem.to_string()),
         cwd,
+        project: None,
         mtime_ms,
+        // 转录能证明会话存在，但证明不了它此刻在干活还是在等你 ——
+        // 最后一条是 assistant 消息，既可能是刚回完话，也可能是正在写下一条。
+        // 留空，让 hook 事件几秒内给出真相。Codex 那边反过来：
+        // rollout 尾部有明确的 task_started / task_complete 边界事件。
+        state: None,
+        detail: None,
     })
 }

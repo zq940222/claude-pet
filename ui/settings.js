@@ -10,6 +10,7 @@ const t = (k, v) => window.I18N.t(k, v);
 
 const ui = {
   autostart: el("autostart"),
+  agents: el("agents"),
   window: el("window"),
   windowHint: el("windowHint"),
   editor: el("editor"),
@@ -112,6 +113,42 @@ function fill(v) {
   about = v.about;
 
   ui.autostart.checked = v.autostart;
+
+  // agent 名单由 Rust 侧给（含本机检测结果），前端不另维护一份枚举
+  ui.agents.textContent = "";
+  for (const a of v.agent_options) {
+    const row = document.createElement("label");
+    row.className = "agent-row" + (a.detected ? "" : " missing");
+
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.value = a.key;
+    box.checked = prefs.agents.includes(a.key);
+    // 没装的不能勾 —— 勾了也扫不到东西，只会让人以为挂件坏了。
+    // 但仍然列出来，否则装完 Codex 找不到开关在哪。
+    box.disabled = !a.detected;
+    row.appendChild(box);
+
+    const name = document.createElement("span");
+    name.className = "agent-name";
+    name.textContent = a.label;
+    row.appendChild(name);
+
+    // 把三件会让人困惑的事直接写在旁边，而不是留给用户猜：
+    // 没装、只有一只宠物、状态有几秒延迟。
+    const notes = [];
+    if (!a.detected) notes.push(t("set.agentMissing"));
+    if (a.gateway) notes.push(t("set.agentGateway"));
+    if (a.polled) notes.push(t("set.agentPolled"));
+    if (notes.length) {
+      const note = document.createElement("span");
+      note.className = "agent-note";
+      note.textContent = notes.join(" · ");
+      row.appendChild(note);
+    }
+
+    ui.agents.appendChild(row);
+  }
 
   ui.window.min = v.window_min;
   ui.window.max = v.window_max;
@@ -235,6 +272,19 @@ function wire() {
   ui.editor.addEventListener("change", () => {
     prefs.editor = ui.editor.value;
     apply("what.editor");
+  });
+
+  // 事件委托挂在容器上，因为勾选框是 fill() 动态建的 ——
+  // 逐个绑定的话，切语言重新 fill 之后旧监听器就跟着 DOM 一起没了
+  ui.agents.addEventListener("change", (e) => {
+    const box = e.target;
+    if (!box || box.type !== "checkbox") return;
+    // 顺序按 Rust 侧的名单来，不按点击顺序 —— sanitise() 也会重排，
+    // 不统一的话 prefs.json 的 diff 会毫无必要地翻来翻去
+    prefs.agents = Array.from(ui.agents.querySelectorAll("input:checked")).map(
+      (b) => b.value
+    );
+    apply("what.agents");
   });
 
   ui.position.addEventListener("change", () => {

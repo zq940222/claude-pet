@@ -133,6 +133,19 @@ function focusNextWaiting() {
 
 // ── 渲染 ─────────────────────────────────────────────────────
 
+/// agent 的显示名。Rust 侧发的是稳定键（`claude-code` / `codex` / ...），
+/// 这里翻成人看的名字。
+///
+/// t() 查不到时返回**键名本身**（不是 undefined），所以不能用 `||` 兜 ——
+/// 那样会显示成 `agent.some-new-agent`。Rust 侧加了新 agent 而前端还没跟上时，
+/// 显示裸键 `some-new-agent` 比显示带前缀的内部键好看。
+function agentLabel(key) {
+  if (!key) return "";
+  const full = `agent.${key}`;
+  const s = t(full);
+  return s === full ? key : s;
+}
+
 function makePet(session, project, big) {
   const node = document.createElement(big ? "button" : "span");
   const state = safeState(session.state);
@@ -141,11 +154,18 @@ function makePet(session, project, big) {
   if (state.startsWith("waiting")) node.classList.add("waiting");
   if (big && session.id === app.selected) node.classList.add("selected");
 
+  // agent 走**边框样式**，不走颜色。颜色整条通道已经被状态占满了
+  // （红色 = 要你动手），再拿它区分 agent 就会两种含义打架。
+  // 边框样式是正交的，而且不影响布局 —— 卡片宽度是量出来的，
+  // 任何改变盒模型尺寸的区分手段都会牵动窗口大小。
+  if (session.agent) node.dataset.agent = session.agent;
+
   node.title =
     `${project} #${session.index} — ${stateText(state)}` +
+    (session.agent ? ` (${agentLabel(session.agent)})` : "") +
     (session.detail ? `\n${session.detail}` : "") +
     (session.cwd ? `\n${session.cwd}` : "") +
-    (big ? `\n\n${t("pet.dblclickHint")}` : "");
+    (big && session.cwd ? `\n\n${t("pet.dblclickHint")}` : "");
 
   if (big) {
     node.type = "button";
@@ -159,6 +179,12 @@ function makePet(session, project, big) {
     // 所以两者不冲突：双击的结果是「先选中它，然后跳过去」，正是想要的。
     node.addEventListener("dblclick", async (e) => {
       e.stopPropagation();
+      // gateway 类的宠物（Hermes / OpenClaw）没有项目目录，cwd 是空串。
+      // 不拦住的话双击会去调 open_in_editor 然后报一个看不懂的错。
+      if (!session.cwd) {
+        flash(t("pet.noProjectDir", { agent: agentLabel(session.agent) }));
+        return;
+      }
       if (!app.invoke) return;
       try {
         const used = await app.invoke("open_in_editor", { sessionId: session.id });

@@ -295,6 +295,22 @@ body {
   font-weight: 700;
 }
 
+/* agent 区分走**边框样式**，不走颜色。
+   颜色整条通道已经被状态占满了（红 = 要你动手），拿它再表达 agent 会让
+   两种含义打架。边框样式是正交的，而且 border-style 不改变盒模型尺寸 ——
+   卡片宽度是量出来的，任何影响尺寸的区分手段都会牵动窗口大小。
+
+   折叠态的 mini 点**刻意不区分**：11px 上任何形状差异都不可读，而折叠条
+   要回答的问题只有「有没有红的」。agent 身份在展开态、tooltip 和详情行里都有。 */
+.pet.big[data-agent="codex"] {
+  border-style: dashed;
+}
+.pet.big[data-agent="hermes"],
+.pet.big[data-agent="openclaw"] {
+  border-style: double;
+  border-width: 3px;
+}
+
 .pet.big:hover {
   transform: scale(1.14);
 }

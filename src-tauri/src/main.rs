@@ -10,12 +10,17 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod agent;
+mod codex;
 mod discover;
 mod editor;
+mod gateway;
 mod hooks;
 mod i18n;
 mod persist;
 mod sound;
+
+use agent::Agent;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -52,7 +57,15 @@ const REPO_URL: &str = "https://github.com/zq940222/claude-pet";
 /// 落盘的就是这个结构，改字段记得同步 `persist` 里的 `CACHE_VERSION`。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Session {
+    /// 哪个 agent 的会话。
+    ///
+    /// `#[serde(default)]` 是给旧缓存留的余地，但**缓存本身是版本门禁的**
+    /// （加这个字段时 `CACHE_VERSION` 已经升到 3），所以实际走不到默认值。
+    /// 留着是因为手改缓存文件的人不该因为漏一个字段就把整份缓存作废。
+    #[serde(default = "default_agent")]
+    agent: Agent,
     /// 完整工作目录。跳回 IDE 要用它 —— `project` 只是末段，拿不回原路径。
+    /// Gateway 类的 agent（Hermes / OpenClaw）这里是空串，它们没有项目概念。
     cwd: String,
     project: String,
     state: String,
@@ -61,6 +74,10 @@ struct Session {
     /// HashMap 的迭代顺序是随机的，不排序图标每次刷新都会乱跳。
     first_seen: u128,
     updated_ms: u128,
+}
+
+fn default_agent() -> Agent {
+    Agent::ClaudeCode
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -72,6 +89,11 @@ struct SessionView {
     detail: String,
     /// 完整路径。前端拿它做 tooltip，也用来判断能不能跳回 IDE。
     cwd: String,
+    /// agent 的稳定键（`claude-code` / `codex` / `hermes` / `openclaw`）。
+    /// 前端用它选角标和配色。
+    agent: &'static str,
+    /// 宠物身上那一个字符的角标
+    badge: &'static str,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -261,16 +283,20 @@ fn handle_event(store: &Store, v: &Value, lang: i18n::Lang) -> bool {
     let Ok(mut m) = store.lock() else { return false };
 
     // 先把要用的旧值取出来，再 insert —— 不然 get 的借用和 insert 的可变借用冲突
-    let (first_seen, prev_state) = match m.get(&sid) {
+    let (first_seen, prev_state, prev_agent) = match m.get(&sid) {
         // first_seen 只在第一次出现时写，后续更新要保留 —— 否则图标顺序会变
-        Some(s) => (s.first_seen, Some(s.state.clone())),
-        None => (now, None),
+        Some(s) => (s.first_seen, Some(s.state.clone()), s.agent),
+        None => (now, None, Agent::ClaudeCode),
     };
     let notify = state.starts_with("waiting") && prev_state.as_deref() != Some(state.as_str());
 
     m.insert(
         sid,
         Session {
+            // hook 事件只会来自 Claude Code（只有它有 hook 系统），但仍然沿用
+            // 旧值而不是写死 —— 万一将来别的 agent 也走这条路，
+            // 一个事件不该把宠物的归属悄悄改掉。
+            agent: prev_agent,
             cwd,
             project,
             state,
@@ -349,6 +375,8 @@ fn build_view(store: &Store, pending: &PendingState) -> AppView {
             state: s.state.clone(),
             detail: s.detail.clone(),
             cwd: s.cwd.clone(),
+            agent: s.agent.key(),
+            badge: s.agent.badge(),
         });
         if priority(&s.state) > priority(&ws.worst) {
             ws.worst = s.state.clone();
@@ -432,29 +460,64 @@ fn resolve_permission(
 
 /// 把扫到的会话并进 store，返回新增数量。
 ///
-/// 真实 hook 事件优先：已经在表里的会话不覆盖 —— 事件带着准确的状态和 detail，
-/// 而扫描只能确定「这个会话存在」。
+/// # 谁能覆盖谁
+///
+/// | 情况 | 行为 | 为什么 |
+/// | --- | --- | --- |
+/// | Claude Code，已在表里 | **不动** | hook 事件带着准确状态，扫描只能确定「存在」 |
+/// | Codex / gateway，已在表里 | **更新状态** | 它们没有 hook，轮询扫描**就是**唯一的状态源 |
+///
+/// 这条区分是必须的。对 Codex 也「已存在就跳过」的话，宠物会永远停在第一次
+/// 扫到的状态上 —— 那正好让整个轮询白做。
 fn merge_discovered(
     store: &Store,
-    found: Vec<discover::Discovered>,
+    found: Vec<agent::Discovered>,
     lang: i18n::Lang,
 ) -> usize {
     let mut added = 0;
     let Ok(mut map) = store.lock() else { return 0 };
 
     for d in found {
-        if map.contains_key(&d.session_id) {
+        if let Some(existing) = map.get(&d.session_id) {
+            // 有 hook 的 agent：事件是权威，扫描不插手
+            if !polls_for_state(d.agent) {
+                continue;
+            }
+            // 没有 hook 的 agent：扫描出的状态就是最新的。
+            // first_seen 保留旧值，否则宠物顺序会跟着每次轮询乱跳。
+            let first_seen = existing.first_seen;
+            let state = d.state.clone().unwrap_or_else(|| "idle".to_string());
+            let detail = d
+                .detail
+                .clone()
+                .unwrap_or_else(|| i18n::restored(lang).to_string());
+            map.insert(
+                d.session_id,
+                Session {
+                    agent: d.agent,
+                    project: d.project.unwrap_or_else(|| project_of(&d.cwd)),
+                    cwd: d.cwd,
+                    state,
+                    detail,
+                    first_seen,
+                    updated_ms: d.mtime_ms,
+                },
+            );
             continue;
         }
+
         map.insert(
             d.session_id,
             Session {
-                project: project_of(&d.cwd),
+                agent: d.agent,
+                project: d.project.unwrap_or_else(|| project_of(&d.cwd)),
                 cwd: d.cwd,
-                // 状态只能是 idle：转录能告诉我们会话存在，但告诉不了它此刻
-                // 是在干活还是在等你。真实事件几秒内就会把它纠正过来。
-                state: "idle".into(),
-                detail: i18n::restored(lang).into(),
+                // 扫描器给不出状态时只能是 idle。Claude Code 就是这种情况：
+                // 转录能告诉我们会话存在，但告诉不了它此刻是在干活还是在等你，
+                // 真实事件几秒内会纠正。Codex 反过来 —— rollout 尾部的
+                // task_started / task_complete 是明确的，所以这里有值。
+                state: d.state.unwrap_or_else(|| "idle".to_string()),
+                detail: d.detail.unwrap_or_else(|| i18n::restored(lang).to_string()),
                 // 用 mtime 而不是 now，这样宠物顺序反映会话的实际活跃先后
                 first_seen: d.mtime_ms,
                 updated_ms: d.mtime_ms,
@@ -465,43 +528,143 @@ fn merge_discovered(
     added
 }
 
+/// 这个 agent 的状态是靠轮询扫描来的，而不是 hook 推的。
+///
+/// 只有 Claude Code 有 hook。Codex 的 `notify` 是 `config.toml` 里的**单个**
+/// 槽位，本机那格已被 OpenAI 自己的 `codex-computer-use.exe` 占着，抢过来会
+/// 弄坏用户已有的功能；Hermes / OpenClaw 是常驻 gateway，没有「一次会话结束」
+/// 这种适合推事件的时机。
+fn polls_for_state(a: Agent) -> bool {
+    a != Agent::ClaudeCode
+}
+
+/// 扫一遍所有启用的 agent。返回 (扫到数, 新增数)。
+fn scan_agents(
+    app: &AppHandle,
+    store: &Store,
+    window: Duration,
+    lang: i18n::Lang,
+    enabled: &[Agent],
+) -> (usize, usize) {
+    let home = app.path().home_dir().ok();
+    let local = app.path().local_data_dir().ok();
+    let mut found: Vec<agent::Discovered> = Vec::new();
+
+    for a in enabled {
+        match a {
+            Agent::ClaudeCode => {
+                if let Some(dir) = discover::projects_dir(home.clone()) {
+                    if dir.is_dir() {
+                        found.extend(discover::scan(&dir, window));
+                    } else {
+                        eprintln!("[claude-pet] {} missing, skipping", dir.display());
+                    }
+                }
+            }
+            Agent::Codex => {
+                if let Some(dir) = codex::sessions_dir(home.clone()) {
+                    if dir.is_dir() {
+                        found.extend(codex::scan(&dir, window));
+                    }
+                }
+            }
+            // Gateway 类不受时间窗影响：它要么现在在跑，要么不在。
+            // 「30 分钟内活动过」对一个常驻进程不是有意义的问题。
+            Agent::Hermes => {
+                found.extend(gateway::hermes_probe(gateway::hermes_home(local.clone()), lang));
+            }
+            Agent::OpenClaw => {
+                found.extend(gateway::openclaw_probe(gateway::openclaw_home(home.clone()), lang));
+            }
+        }
+    }
+
+    // gateway 探测返回 None 表示「没在跑」，此时要把上一轮留下的宠物撤掉，
+    // 否则关掉 gateway 之后那只宠物会永远挂在那儿。
+    let alive: Vec<String> = found.iter().map(|d| d.session_id.clone()).collect();
+    if let Ok(mut map) = store.lock() {
+        map.retain(|id, s| !s.agent.is_gateway() || alive.iter().any(|a| a == id));
+    }
+
+    let scanned = found.len();
+    let added = merge_discovered(store, found, lang);
+    (scanned, added)
+}
+
 /// 后台线程里跑发现，扫完再 emit。不能放在 setup 的主路径上 ——
 /// 本机 54 个项目目录、651 个转录，扫描不该拖慢窗口出现。
 ///
-/// 改了时间窗设置后会再调一次：对这个设置来说，「立即生效」只能是
-/// 用新窗口重扫一遍，光改数字对已经建好的会话表没有任何影响。
+/// 改了时间窗设置或启用的 agent 后会再调一次：对这两个设置来说，
+/// 「立即生效」只能是重扫一遍，光改配置对已经建好的会话表没有任何影响。
 fn spawn_discovery(
     app: AppHandle,
     store: Store,
     pending: PendingState,
     window: Duration,
     lang: i18n::Lang,
+    enabled: Vec<Agent>,
 ) {
     std::thread::spawn(move || {
-        let home = app.path().home_dir().ok();
-        let Some(dir) = discover::projects_dir(home) else {
-            eprintln!("[claude-pet] cannot locate ~/.claude/projects, skipping discovery");
-            return;
-        };
-        if !dir.is_dir() {
-            eprintln!("[claude-pet] {} does not exist, skipping discovery", dir.display());
-            return;
-        }
-
         let started = std::time::Instant::now();
-        let found = discover::scan(&dir, window);
-        let scanned = found.len();
-        let added = merge_discovered(&store, found, lang);
+        let (scanned, added) = scan_agents(&app, &store, window, lang, &enabled);
 
         eprintln!(
-            "[claude-pet] discovery: {scanned} recent session(s), {added} restored, took {}ms",
+            "[claude-pet] discovery: {scanned} session(s) across {} agent(s), {added} new, took {}ms",
+            enabled.len(),
             started.elapsed().as_millis()
         );
 
-        if added > 0 {
+        // 不能只在 added > 0 时 emit —— 轮询的 agent 可能只是**状态**变了
+        // （Codex 从 working 变成 task_complete），会话数一个没多。
+        // 那种情况不推的话宠物就永远停在旧状态上。
+        let _ = app.emit("pet://view", build_view(&store, &pending));
+    });
+}
+
+/// 没有 hook 的 agent 靠这个循环维持状态。
+///
+/// 5 秒一轮，和落盘线程同一个节奏。为什么是 5 秒：Codex 要读 rollout 文件
+/// 尾部的 64KB，本机 151 个文件里落在时间窗内的通常只有几个，所以一轮的成本
+/// 是几毫秒；再快没有意义，因为「有没有在等我」这个问题不需要亚秒级精度。
+const POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+fn spawn_poller(app: AppHandle, store: Store, pending: PendingState, prefs: PrefsState) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(POLL_INTERVAL);
+
+        // 每轮重读偏好：设置窗口里改了启用的 agent 要能立刻生效，
+        // 而不是等重启。
+        let (window, lang, enabled) = match prefs.lock() {
+            Ok(p) => (p.discover_window(), p.resolved_lang(), p.enabled_agents()),
+            Err(_) => continue,
+        };
+        let polled: Vec<Agent> = enabled.into_iter().filter(|a| polls_for_state(*a)).collect();
+        if polled.is_empty() {
+            continue;
+        }
+
+        let before = store.lock().ok().map(|m| snapshot(&m));
+        scan_agents(&app, &store, window, lang, &polled);
+        let after = store.lock().ok().map(|m| snapshot(&m));
+
+        // 只在真的变了才 emit。轮询是每 5 秒一次的，无条件推会让前端
+        // 每 5 秒重渲染一遍 —— 而重渲染会重新测量卡片、调 resize_pet，
+        // 也就是每 5 秒动一次窗口。
+        if before != after {
             let _ = app.emit("pet://view", build_view(&store, &pending));
         }
     });
+}
+
+/// 用来判断「有没有变化」的指纹。只含影响显示的字段 ——
+/// `updated_ms` 每轮都在动，把它算进来等于无条件 emit。
+fn snapshot(map: &HashMap<String, Session>) -> Vec<(String, String, String)> {
+    let mut v: Vec<(String, String, String)> = map
+        .iter()
+        .map(|(id, s)| (id.clone(), s.state.clone(), s.detail.clone()))
+        .collect();
+    v.sort();
+    v
 }
 
 /// 装/卸「权限拦截」那条 hook。与普通的 6 条分开，必须显式开启 ——
@@ -622,10 +785,16 @@ fn handle_permission(
     // 用户已经认识「红色 + ! + 呼吸」就是要他动手。
     if let Ok(mut m) = store.lock() {
         let now = now_ms();
-        let first_seen = m.get(&session_id).map(|s| s.first_seen).unwrap_or(now);
+        // 一次取完旧值再 insert —— 分两次 get 会和 insert 的可变借用打起来
+        let (first_seen, prev_agent) = match m.get(&session_id) {
+            Some(s) => (s.first_seen, s.agent),
+            // 权限拦截 hook 只有 Claude Code 有
+            None => (now, Agent::ClaudeCode),
+        };
         m.insert(
             session_id.clone(),
             Session {
+                agent: prev_agent,
                 cwd,
                 project: project.clone(),
                 state: "waiting-permission".into(),
@@ -947,6 +1116,56 @@ struct AboutInfo {
     port: u16,
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct AgentOption {
+    key: &'static str,
+    label: &'static str,
+    badge: &'static str,
+    /// 一个会话一只宠物（false）还是整个 agent 一只（true）。
+    /// 界面上要说明这件事，否则用户会奇怪为什么 Hermes 只有一只。
+    gateway: bool,
+    /// 本机找到配置目录了吗
+    detected: bool,
+    /// 状态是轮询来的还是 hook 推的。界面上标一下，
+    /// 否则用户会以为 Codex 的几秒延迟是 bug。
+    polled: bool,
+}
+
+/// 探一下本机装了哪些 agent。只看配置目录存在与否 —— 不去跑它们的 CLI，
+/// 那会在设置窗口打开时莫名启动别人的进程。
+fn agent_options(app: &AppHandle) -> Vec<AgentOption> {
+    let home = app.path().home_dir().ok();
+    let local = app.path().local_data_dir().ok();
+
+    Agent::ALL
+        .iter()
+        .map(|a| {
+            let detected = match a {
+                Agent::ClaudeCode => discover::projects_dir(home.clone())
+                    .map(|d| d.is_dir())
+                    .unwrap_or(false),
+                Agent::Codex => codex::sessions_dir(home.clone())
+                    .map(|d| d.is_dir())
+                    .unwrap_or(false),
+                Agent::Hermes => gateway::hermes_home(local.clone())
+                    .map(|d| d.is_dir())
+                    .unwrap_or(false),
+                Agent::OpenClaw => gateway::openclaw_home(home.clone())
+                    .map(|d| d.is_dir())
+                    .unwrap_or(false),
+            };
+            AgentOption {
+                key: a.key(),
+                label: a.label(),
+                badge: a.badge(),
+                gateway: a.is_gateway(),
+                detected,
+                polled: polls_for_state(*a),
+            }
+        })
+        .collect()
+}
+
 /// 设置窗口一次性拿走它需要的全部东西，省得开好几个命令来回问。
 #[derive(Serialize)]
 struct SettingsView {
@@ -964,6 +1183,11 @@ struct SettingsView {
     permission_wait_secs: u64,
     /// 合法的摆放模式，设置窗口用它填下拉框
     position_modes: Vec<String>,
+    /// 所有可选的 agent。设置窗口用它渲染勾选列表，前端不另维护一份名单。
+    ///
+    /// `detected` 表示本机找到了它的配置目录 —— 用来在界面上标注「没装」，
+    /// 而不是把它藏起来：藏起来的话，用户装完 Codex 会找不到开关在哪。
+    agent_options: Vec<AgentOption>,
     /// 解析后的语言（`"auto"` 已经变成 `zh` / `en`）。
     /// 前端不自己猜系统语言 —— 两边各猜一次必然会有不一致的时候。
     lang_code: String,
@@ -989,6 +1213,7 @@ fn get_settings(app: AppHandle, prefs: tauri::State<PrefsState>) -> SettingsView
         permission_matcher: hooks::permission_status(&app),
         permission_wait_secs: PERMISSION_WAIT.as_secs(),
         position_modes: persist::POSITION_MODES.iter().map(|s| s.to_string()).collect(),
+        agent_options: agent_options(&app),
         lang_code,
         about: AboutInfo {
             version: app.package_info().version.to_string(),
@@ -1017,13 +1242,14 @@ fn apply_prefs(
     next.sanitise();
 
     // 在锁里算出「哪些变了」，出了锁再去做重扫/重注册这些慢动作
-    let (window_changed, shortcuts_changed, lang_changed, position_changed) = {
+    let (window_changed, shortcuts_changed, lang_changed, position_changed, agents_changed) = {
         let mut p = prefs_state.lock().map_err(|_| "prefs lock poisoned")?;
         let changed = (
             p.discover_window_minutes != next.discover_window_minutes,
             p.shortcut_toggle != next.shortcut_toggle || p.shortcut_next != next.shortcut_next,
             p.resolved_lang() != next.resolved_lang(),
             p.position_mode != next.position_mode,
+            p.agents != next.agents,
         );
         *p = next.clone();
         persist::save_prefs(&app, &p);
@@ -1050,8 +1276,18 @@ fn apply_prefs(
         }
     }
 
-    // 时间窗变了就用新窗口重扫一遍，这才叫「立即生效」
-    if window_changed {
+    // 时间窗或启用的 agent 变了就重扫一遍，这才叫「立即生效」。
+    // 光改配置对已经建好的会话表没有任何影响。
+    if window_changed || agents_changed {
+        // 取消勾选的 agent 留下的宠物要先撤掉 —— 不撤的话它们会一直挂着，
+        // 而用户明确说了不想看它们。gateway 宠物由 scan_agents 自己 retain，
+        // 这里处理的是 Codex 这种「不再扫但表里还有」的情况。
+        if agents_changed {
+            let keep = next.enabled_agents();
+            if let Ok(mut m) = store.lock() {
+                m.retain(|_, s| keep.contains(&s.agent));
+            }
+        }
         let pending: tauri::State<PendingState> = app.state();
         spawn_discovery(
             app.clone(),
@@ -1059,6 +1295,7 @@ fn apply_prefs(
             (*pending).clone(),
             next.discover_window(),
             next.resolved_lang(),
+            next.enabled_agents(),
         );
     }
 
@@ -1577,18 +1814,21 @@ fn main() {
             let mut window = persist::Prefs::default().discover_window();
             let mut startup_lang = i18n::Lang::Zh;
             let mut startup_position_mode = persist::Prefs::default().position_mode;
+            let mut startup_agents = persist::Prefs::default().enabled_agents();
             if let Ok(mut p) = prefs.lock() {
                 *p = persist::load_prefs(&handle);
                 window = p.discover_window();
                 startup_lang = p.resolved_lang();
                 startup_position_mode = p.position_mode.clone();
+                startup_agents = p.enabled_agents();
                 eprintln!(
-                    "[claude-pet] prefs: lang={} muted={} sound={} window={}min position={}",
+                    "[claude-pet] prefs: lang={} muted={} sound={} window={}min position={} agents={}",
                     startup_lang.code(),
                     p.muted,
                     p.sound,
                     p.discover_window_minutes,
-                    p.position_mode
+                    p.position_mode,
+                    p.agents.join(",")
                 );
             }
 
@@ -1694,7 +1934,18 @@ fn main() {
             }
 
             spawn_server(handle.clone(), store.clone(), prefs.clone(), pending.clone());
-            spawn_discovery(handle, store.clone(), pending.clone(), window, startup_lang);
+            // 没有 hook 的 agent（Codex / Hermes / OpenClaw）靠这个循环维持状态。
+            // 只要有任何一个被启用它就有事做；一个都没启用时它每轮空转一次就睡，
+            // 成本可以忽略，所以不按配置决定要不要起 —— 那样改设置就得重启。
+            spawn_poller(handle.clone(), store.clone(), pending.clone(), prefs.clone());
+            spawn_discovery(
+                handle,
+                store.clone(),
+                pending.clone(),
+                window,
+                startup_lang,
+                startup_agents,
+            );
             Ok(())
         })
         .run(tauri::generate_context!())

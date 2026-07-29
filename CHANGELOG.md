@@ -10,6 +10,22 @@
 
 ### Added
 
+- **支持 Codex / Hermes / OpenClaw**（#13）—— 设置窗口里勾选要盯哪些 agent，默认只开 Claude Code。四个 agent 的处理方式**不一样**，因为实测能拿到的东西不一样：
+  - **Codex 是一等公民**，和 Claude Code 完全同构：按 cwd 分工作空间、一个会话一只宠物。状态从 `~/.codex/sessions/**/rollout-*.jsonl` 的**尾部**读 `task_started` / `task_complete` 两个边界事件（语义等同 Claude Code 的 `UserPromptSubmit` / `Stop`，所以复用同一套状态名和视觉）。刻意不看 `agent_message` / `function_call` —— 那些一轮里出现几十次，会把「刚说完一句话」误当成「结束了」
+  - **Hermes / OpenClaw 各一只 gateway 宠物**，放在以自己命名的工作空间里，只回答「在不在跑」。它们**不是**按项目的交互式 agent：Hermes 的 `sessions` 表虽有 `cwd` / `ended_at` 列，但本机 22 条里只有 2 条 `cwd` 非空、16 条 `ended_at` 永远是 null，硬做成会话宠物会得到一堆永远「在跑」、永远归不进项目的僵尸；OpenClaw 是单 agent 从 20 多个聊天入口进来，`workspaceDir` 恒为 gateway 自己的工作区，`status` 只有 `done`/`failed`/`timeout`（运行结果，不是此刻状态）
+  - **没在跑就不产出宠物**，而不是加一个 `offline` 状态 —— 没在跑就没什么要盯的，一只常驻的灰色宠物只是在占地方
+  - **只有 Claude Code 有 hook**，其余靠 5 秒轮询。Codex 的 `notify` 是 `config.toml` 里的**单个**槽位，本机那格已被 OpenAI 自己的 `codex-computer-use.exe` 占着，抢过来会弄坏用户已有的功能；gateway 则本来就没有「一次会话结束」这种适合推事件的时机。设置界面标了「轮询，有延迟」，免得被当成 bug
+  - 轮询**只在指纹变化时** emit（指纹含 id + state + detail，刻意不含 `updated_ms`）。无条件推会让前端每 5 秒重渲染，而重渲染要重新测量卡片并调 `resize_pet` —— 等于每 5 秒动一次窗口
+  - 对轮询的 agent 扫描结果**覆盖**已有状态，对 Claude Code 不覆盖。不区分的话 Codex 宠物会永远停在第一次扫到的状态，整个轮询白做
+  - **判活方式按各自有的信号来**：OpenClaw 走 `gateway.port` 的裸 TCP 探测（**刻意不读**同一段里的 `auth.token`，建连不需要认证，读它是多余的暴露面）；Hermes 走 `gateway_state.json` 的 pid，并额外要求 `gateway_state` 字段自己也说 `running`（pid 会被回收，只看 pid 可能在 gateway 被 kill -9 后虚报）
+  - **agent 走边框样式，不走颜色** —— 颜色整条通道已被状态占满（红 = 要你动手）。实线 = Claude Code、虚线 = Codex、双线 = gateway，且 `border-style` 不改变盒模型尺寸，不会牵动「量卡片得出窗口尺寸」那套逻辑。折叠态 11px 的点刻意不区分：那个尺寸上形状差异不可读，而折叠条只需要回答「有没有红的」
+  - 缓存版本升到 3；gateway 宠物 `cwd` 为空串，双击跳编辑器会被拦住并提示而不是报一个看不懂的错
+  - 尊重 `CODEX_HOME` / `HERMES_HOME` / `OPENCLAW_CONFIG_DIR`
+
+### Fixed
+
+- **gateway 宠物的 detail 在英文界面下混中文** —— 那行文案是探测时现拼的，第一版直接写了中文字面量。现在走 `i18n`，和 hook 生成的 detail 一致。测试里加了一条 CJK 断言守住。
+
 - **Windows 安装包**（#17）—— `cargo tauri build --bundles nsis` 产出 1.21 MB 的 `claude-pet-x.y.z-x64-setup.exe`。`installMode: currentUser` → `RequestExecutionLevel user`，**不弹 UAC**，装到 `%LOCALAPPDATA%\Claude Pet\`，建开始菜单 + 桌面快捷方式，安装界面可选简体中文 / English。发布时同时产出安装包和原来的绿色 zip。
   - **`NSIS_HOOK_PREINSTALL` 清理 `install.ps1` 的旧副本** —— 两种安装方式装到不同目录（`ClaudePet` vs `Claude Pet`），但自启只有**一个**值名 `HKCU\...\Run\Claude Pet`。不清理的话会留下两份 exe，自启指向后装的那份，另一份成为永远不会被更新的孤儿。反方向由 `install.ps1` 检测卸载注册表键后**直接拒绝**安装
   - **偏好刻意不删** —— 卸载器的「删除应用数据」只清 `%LOCALAPPDATA%\com.opsmateai.claude-pet`（WebView2 缓存），我们的 `prefs.json` / `sessions.json` / `window-anchor.json` 在 `%APPDATA%` 下，卸载后保留、重装即恢复
