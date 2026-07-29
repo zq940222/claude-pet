@@ -11,6 +11,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod discover;
+mod editor;
 mod hooks;
 mod persist;
 mod sound;
@@ -37,6 +38,8 @@ const PORT: u16 = 47800;
 /// 落盘的就是这个结构，改字段记得同步 `persist` 里的 `CACHE_VERSION`。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Session {
+    /// 完整工作目录。跳回 IDE 要用它 —— `project` 只是末段，拿不回原路径。
+    cwd: String,
     project: String,
     state: String,
     detail: String,
@@ -53,6 +56,8 @@ struct SessionView {
     index: usize,
     state: String,
     detail: String,
+    /// 完整路径。前端拿它做 tooltip，也用来判断能不能跳回 IDE。
+    cwd: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -192,7 +197,12 @@ fn handle_event(store: &Store, v: &Value) -> bool {
     let Some((state, detail)) = classify(v) else {
         return false;
     };
-    let project = project_of(v.get("cwd").and_then(Value::as_str).unwrap_or(""));
+    let cwd = v
+        .get("cwd")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let project = project_of(&cwd);
     let now = now_ms();
 
     let Ok(mut m) = store.lock() else { return false };
@@ -208,6 +218,7 @@ fn handle_event(store: &Store, v: &Value) -> bool {
     m.insert(
         sid,
         Session {
+            cwd,
             project,
             state,
             detail,
@@ -261,6 +272,7 @@ fn build_view(store: &Store) -> AppView {
             index: ws.sessions.len() + 1,
             state: s.state.clone(),
             detail: s.detail.clone(),
+            cwd: s.cwd.clone(),
         });
         if priority(&s.state) > priority(&ws.worst) {
             ws.worst = s.state.clone();
@@ -309,6 +321,7 @@ fn merge_discovered(store: &Store, found: Vec<discover::Discovered>) -> usize {
             d.session_id,
             Session {
                 project: project_of(&d.cwd),
+                cwd: d.cwd,
                 // 状态只能是 idle：转录能告诉我们会话存在，但告诉不了它此刻
                 // 是在干活还是在等你。真实事件几秒内就会把它纠正过来。
                 state: "idle".into(),
@@ -394,10 +407,8 @@ fn spawn_server(app: AppHandle, store: Store, prefs: PrefsState) {
         let server = match tiny_http::Server::http(("127.0.0.1", PORT)) {
             Ok(s) => s,
             Err(e) => {
-                // 这里刻意用英文：Windows 控制台默认 GBK 代码页，
-                // 中文会变乱码，而这恰好是最需要看清的一条错误。
-                eprintln!("[claude-pet] failed to bind 127.0.0.1:{PORT}: {e}");
-                eprintln!("[claude-pet] port in use? another pet instance may be running");
+                eprintln!("[claude-pet] 无法监听 127.0.0.1:{PORT}: {e}");
+                eprintln!("[claude-pet] 端口被占用？可能已经有一个挂件在跑");
                 return;
             }
         };
@@ -518,6 +529,8 @@ struct AboutInfo {
 struct SettingsView {
     prefs: persist::Prefs,
     sounds: Vec<String>,
+    /// 本机实际装了的编辑器。没装的不该出现在下拉框里。
+    editors: Vec<editor::Available>,
     window_min: u64,
     window_max: u64,
     autostart: bool,
@@ -534,6 +547,7 @@ fn get_settings(app: AppHandle, prefs: tauri::State<PrefsState>) -> SettingsView
     SettingsView {
         prefs: current,
         sounds: sound::AVAILABLE.iter().map(|s| s.to_string()).collect(),
+        editors: editor::available(),
         window_min: persist::WINDOW_MIN,
         window_max: persist::WINDOW_MAX,
         autostart: app.autolaunch().is_enabled().unwrap_or(false),
@@ -604,6 +618,34 @@ fn set_autostart(
         }
     }
     Ok(())
+}
+
+/// 双击宠物 → 在编辑器里打开该会话的 cwd。
+#[tauri::command]
+fn open_in_editor(
+    store: tauri::State<Store>,
+    prefs: tauri::State<PrefsState>,
+    session_id: String,
+) -> Result<String, String> {
+    let cwd = store
+        .lock()
+        .map_err(|_| "store lock poisoned".to_string())?
+        .get(&session_id)
+        .map(|s| s.cwd.clone())
+        .ok_or("会话已不存在")?;
+
+    if cwd.is_empty() {
+        // 从 v1 缓存恢复的会话没有 cwd。理论上 v2 的版本门禁已经把这种
+        // 情况挡掉了，留着这条是因为「猜一个路径」比报错更糟。
+        return Err("这个会话没有记录工作目录".into());
+    }
+
+    let preferred = prefs
+        .lock()
+        .map(|p| p.editor.clone())
+        .unwrap_or_else(|_| "auto".to_string());
+
+    editor::open(&cwd, &preferred)
 }
 
 #[tauri::command]
@@ -771,6 +813,33 @@ fn build_tray(app: &tauri::App, prefs: PrefsState, tray_state: TrayState) -> tau
 
 // ── 无头 CLI ─────────────────────────────────────────────────
 
+/// 处理 `--open <dir>`：用配置的编辑器打开一个目录然后退出。
+///
+/// 存在的理由是可诊断性：双击宠物跳不动时，这条命令能把「编辑器探测/启动」
+/// 这一环单独拎出来验，不必去猜是 UI 没响应还是 spawn 失败。
+fn handle_open_cli(app: &tauri::App) -> Option<i32> {
+    let args: Vec<String> = std::env::args().collect();
+    let idx = args.iter().position(|a| a == "--open")?;
+    let Some(dir) = args.get(idx + 1) else {
+        eprintln!("[claude-pet] --open needs a directory");
+        return Some(1);
+    };
+
+    let preferred = persist::load_prefs(app.handle()).editor;
+    eprintln!("[claude-pet] editors found: {:?}",
+        editor::available().iter().map(|e| e.key.as_str()).collect::<Vec<_>>());
+    match editor::open(dir, &preferred) {
+        Ok(label) => {
+            eprintln!("[claude-pet] opened {dir} in {label} (preferred={preferred})");
+            Some(0)
+        }
+        Err(e) => {
+            eprintln!("[claude-pet] open failed: {e}");
+            Some(1)
+        }
+    }
+}
+
 /// 处理 `--install-hooks` / `--uninstall-hooks` / `--hooks-status`。
 /// 约定与 autostart 那组一致：用退出码传结果。
 fn handle_hooks_cli(app: &tauri::App) -> Option<i32> {
@@ -899,7 +968,32 @@ fn handle_autostart_cli(app: &tauri::App) -> Option<i32> {
 
 // ── main ─────────────────────────────────────────────────────
 
+/// 把控制台输出代码页设成 UTF-8。
+///
+/// Windows 控制台默认是 GBK（本机 936），而 Rust 的 `eprintln!` 写的是 UTF-8，
+/// 于是所有中文诊断信息都会变成 `涓嶅湪 PATH 涓?` 这种乱码。之前的应对是
+/// 「日志一律写英文」，那是绕开而不是解决 —— 用户看到的错误信息本该是中文的。
+///
+/// release 构建带 `windows_subsystem = "windows"`，没有控制台，这里是安全的空操作。
+#[cfg(windows)]
+fn use_utf8_console() {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn SetConsoleOutputCP(cp: u32) -> i32;
+    }
+    const CP_UTF8: u32 = 65001;
+    // SAFETY: 只是设置当前进程控制台的输出代码页，没有指针参与。
+    unsafe {
+        SetConsoleOutputCP(CP_UTF8);
+    }
+}
+
+#[cfg(not(windows))]
+fn use_utf8_console() {}
+
 fn main() {
+    use_utf8_console();
+
     let store: Store = Arc::new(Mutex::new(HashMap::new()));
     let anchor: AnchorState = Arc::new(Mutex::new(None));
     // 真正的值在 setup 里从磁盘读 —— 那时才拿得到 AppHandle 来解析配置目录
@@ -922,7 +1016,8 @@ fn main() {
             apply_prefs,
             set_autostart,
             preview_sound,
-            set_hooks
+            set_hooks,
+            open_in_editor
         ])
         .setup(move |app| {
             // 无头 CLI：安装脚本要用，也方便手工排查。
@@ -931,6 +1026,9 @@ fn main() {
                 std::process::exit(code);
             }
             if let Some(code) = handle_hooks_cli(app) {
+                std::process::exit(code);
+            }
+            if let Some(code) = handle_open_cli(app) {
                 std::process::exit(code);
             }
 

@@ -515,6 +515,11 @@ body {
   content: " · ";
 }
 
+/* 跳转失败时的临时提示色，盖过 --accent */
+.line-2.flash-err {
+  color: #ff8a82 !important;
+}
+
 .line-2 {
   font-size: 11px;
   color: var(--accent);

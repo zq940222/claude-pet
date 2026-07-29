@@ -15,7 +15,10 @@ use tauri::{AppHandle, Manager};
 
 /// 缓存格式版本。改了字段就加一 —— 旧文件会被整体丢弃，
 /// 而不是被 serde 误解析成半对半错的状态。
-const CACHE_VERSION: u32 = 1;
+///
+/// v2: `Session` 增加了 `cwd`（跳回 IDE 需要完整路径）。v1 的缓存里没有这个
+/// 字段，加载后会是空串、双击跳不动，所以宁可整份丢掉重新扫。
+const CACHE_VERSION: u32 = 2;
 
 const SESSIONS_FILE: &str = "sessions.json";
 const ANCHOR_FILE: &str = "window-anchor.json";
@@ -126,6 +129,15 @@ pub struct Prefs {
     /// 本机有 651 个历史转录，窗口太大会一次冒出几十个早已关掉的会话。
     #[serde(default = "default_window_minutes")]
     pub discover_window_minutes: u64,
+    /// 双击宠物时用哪个编辑器。`"auto"` 表示按 `editor::EDITORS` 的顺序
+    /// 取第一个装了的；指定具体某个时**不做回落** —— 用户明确选了
+    /// VS Code，静默换成 Cursor 是在骗人。
+    #[serde(default = "default_editor")]
+    pub editor: String,
+}
+
+fn default_editor() -> String {
+    "auto".to_string()
 }
 
 fn default_sound() -> String {
@@ -147,6 +159,7 @@ impl Default for Prefs {
             muted: false,
             sound: default_sound(),
             discover_window_minutes: default_window_minutes(),
+            editor: default_editor(),
         }
     }
 }
@@ -164,6 +177,11 @@ impl Prefs {
         self.discover_window_minutes = self
             .discover_window_minutes
             .clamp(WINDOW_MIN, WINDOW_MAX);
+        if self.editor != "auto"
+            && !crate::editor::EDITORS.iter().any(|e| e.key == self.editor)
+        {
+            self.editor = default_editor();
+        }
     }
 }
 

@@ -136,6 +136,28 @@ cd src-tauri && cargo build --release
 
 设置窗口有独立的 `settings.css`，**刻意不复用** `style.css`：后者是给透明无边框挂件写的，`body` 是 flex 容器、卡片靠 `flex-shrink:0` 顶出真实尺寸供窗口测量，那套约束搬到普通窗口上只会互相坑。
 
+## 双击宠物跳回编辑器
+
+看到「core 在等你」之后，下一个动作必然是切过去。双击宠物就用对应项目的 cwd 打开编辑器。
+
+单击仍是选中 —— 浏览器会先派发 `click` 再派发 `dblclick`，所以双击的效果是「先选中它，再跳过去」，正是想要的。
+
+探测顺序：Cursor → VS Code → Windsurf → JetBrains 各款。设置窗口里可以指定具体某个；**指定了就不回落** —— 你明确选了 VS Code，静默换成 Cursor 是在骗人。下拉框只列本机实际装了的，列出没装的等于埋一个「选了却不工作」的坑。
+
+`code` / `cursor` 在 Windows 上是 `.cmd` shim，而 Rust 的 `Command` 直接调 `CreateProcessW`，执行 `.cmd` 会失败。所以自己实现了 `which`（走 `PATH` + `PATHEXT`）拿到完整路径，再按扩展名决定要不要经 `cmd` 启动。
+
+启动时切断了子进程的 stdio 继承。不切的话编辑器会一直持有继承来的管道句柄，任何等待挂件输出的调用方都会挂到编辑器关闭为止 —— 实测挂死过。
+
+诊断用：
+
+```bash
+claude-pet.exe --open D:\some\project
+```
+
+会打印探测到的编辑器列表和实际结果，把「编辑器探测/启动」这一环单独拎出来验，不用猜是 UI 没响应还是 spawn 失败。
+
+**终端的 tab 级跳回不在这里** —— 那条在 Windows 上有结构性障碍（Windows Terminal 单 HWND 多 Tab），另有 issue 调研。
+
 ## 提示音
 
 挂件是视觉的，人离开屏幕就失效，所以进入等待态时会响一声。

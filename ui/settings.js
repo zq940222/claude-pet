@@ -9,6 +9,8 @@ const ui = {
   autostart: el("autostart"),
   window: el("window"),
   windowHint: el("windowHint"),
+  editor: el("editor"),
+  editorHint: el("editorHint"),
   soundOn: el("soundOn"),
   sound: el("sound"),
   preview: el("preview"),
@@ -78,6 +80,28 @@ function fill(v) {
     `启动时只把这段时间内活动过的会话恢复出来（${v.window_min}–${v.window_max} 分钟）。` +
     `改完会立刻用新窗口重扫一遍。`;
 
+  // 只列本机实际装了的。列出没装的选项等于埋一个「选了却不工作」的坑。
+  ui.editor.textContent = "";
+  const auto = document.createElement("option");
+  auto.value = "auto";
+  auto.textContent =
+    v.editors.length ? `自动（${v.editors[0].label}）` : "自动（未找到编辑器）";
+  ui.editor.appendChild(auto);
+  for (const e of v.editors) {
+    const o = document.createElement("option");
+    o.value = e.key;
+    o.textContent = e.label;
+    o.title = e.path;
+    ui.editor.appendChild(o);
+  }
+  // prefs 里存的编辑器可能已经卸载了，此时回落到 auto 而不是显示一个空选项
+  const known = ["auto", ...v.editors.map((e) => e.key)];
+  ui.editor.value = known.includes(prefs.editor) ? prefs.editor : "auto";
+  ui.editor.disabled = v.editors.length === 0;
+  ui.editorHint.textContent = v.editors.length
+    ? `双击宠物在对应项目里打开。已找到：${v.editors.map((e) => e.label).join("、")}。`
+    : "PATH 上没找到 Cursor / VS Code / JetBrains 的命令行工具，双击不会有反应。";
+
   ui.soundOn.checked = !prefs.muted;
   ui.sound.textContent = "";
   for (const s of v.sounds) {
@@ -121,6 +145,11 @@ function wire() {
     }
     prefs.discover_window_minutes = n;
     apply("时间窗").then(refreshAfterClamp);
+  });
+
+  ui.editor.addEventListener("change", () => {
+    prefs.editor = ui.editor.value;
+    apply("编辑器");
   });
 
   ui.soundOn.addEventListener("change", () => {

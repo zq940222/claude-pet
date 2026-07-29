@@ -97,7 +97,9 @@ function makePet(session, project, big) {
 
   node.title =
     `${project} #${session.index} — ${STATE_TEXT[state]}` +
-    (session.detail ? `\n${session.detail}` : "");
+    (session.detail ? `\n${session.detail}` : "") +
+    (session.cwd ? `\n${session.cwd}` : "") +
+    (big ? "\n\n双击在编辑器中打开" : "");
 
   if (big) {
     node.type = "button";
@@ -107,8 +109,33 @@ function makePet(session, project, big) {
       app.selected = session.id;
       render();
     });
+    // 双击跳回 IDE。单击仍是选中 —— 浏览器会先派发 click 再派发 dblclick，
+    // 所以两者不冲突：双击的结果是「先选中它，然后跳过去」，正是想要的。
+    node.addEventListener("dblclick", async (e) => {
+      e.stopPropagation();
+      if (!app.invoke) return;
+      try {
+        const used = await app.invoke("open_in_editor", { sessionId: session.id });
+        flash(`已在 ${used} 中打开`);
+      } catch (err) {
+        flash(String(err), true);
+      }
+    });
   }
   return node;
+}
+
+/// 在详情行上短暂顶掉原文显示一条结果。挂件太小放不下 toast，
+/// 而完全没有反馈的话，跳转失败时用户只会以为双击没生效。
+let flashTimer = null;
+function flash(msg, isError) {
+  el.dDetail.textContent = msg;
+  el.dDetail.classList.toggle("flash-err", !!isError);
+  clearTimeout(flashTimer);
+  flashTimer = setTimeout(() => {
+    el.dDetail.classList.remove("flash-err");
+    render();
+  }, isError ? 3200 : 1600);
 }
 
 function renderStrip(view) {
