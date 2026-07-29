@@ -118,7 +118,38 @@ Release 构建（产物在 `src-tauri/target/release/claude-pet.exe`）：
 cd src-tauri && cargo build --release
 ```
 
-**托盘菜单是唯一的控制入口** —— 窗口没有标题栏也不在任务栏。菜单里有当前版本、开机自启开关、退出。
+**托盘菜单是唯一的控制入口** —— 窗口没有标题栏也不在任务栏。菜单里有当前版本、开机自启开关、提示音开关、退出。
+
+## 提示音
+
+挂件是视觉的，人离开屏幕就失效，所以进入等待态时会响一声。
+
+**只在状态「变成」等待态时响一次。** 判据是「新状态是 waiting 且不等于旧状态」：
+
+| 转换 | 响？ | 为什么 |
+| --- | --- | --- |
+| `working` → `waiting-input` | ✅ | 有新东西要你处理 |
+| `waiting-input` → `waiting-input` | ❌ | 同一件事的重复事件，连着响会变噪音 |
+| `waiting-input` → `waiting-permission` | ✅ | 要你处理的事情换了 |
+| `waiting-*` → `working` / `idle` / `done` | ❌ | 不需要你了 |
+
+播放的是 Windows 声音方案里**已有**的系统音（默认 `Notification.Default`），直接 FFI 调 winmm 的 `PlaySoundW`。所以不引入任何音频 crate、**零字节**体积增量，而且自动尊重你在系统设置里配的声音和音量 —— 自带一个 wav 反而会绕过这些。
+
+带 `SND_NODEFAULT`：你把某个事件设成「无声音」是明确意图，不该被我们退回蜂鸣绕过。
+
+静音开关在托盘菜单（正向表述：勾上 = 会响），状态存在 `%APPDATA%\com.opsmateai.claude-pet\prefs.json`。打开时会立刻试听一声，好知道自己听到的是什么。
+
+`prefs.json` 里的 `sound` 字段可以手改，合法值见 `sound::AVAILABLE`。写错的话启动时会警告并回落到默认 —— `SND_NODEFAULT` 下打错字是**静默无声**的，不校验的话你只会以为提示音坏了。
+
+### 和 toast 脚本的关系（会重叠）
+
+如果你还配着 `claude-alert.ps1` 那个持久化 toast（matcher `permission_prompt|agent_needs_input`），它和挂件的提示音**会在同样的时机同时响**，而且 toast 用的是**循环闹铃**。三个选择：
+
+1. **去掉 toast 的 hook** —— 挂件现在既有视觉也有声音，toast 的独特价值只剩「不点不消失」
+2. **让 toast 静音** —— 把 `claude-alert.ps1` 里的 `<audio>` 换成 `<audio silent="true"/>`，保留持久化视觉，声音交给挂件
+3. **关掉挂件的提示音** —— 托盘里取消勾选，声音继续由 toast 负责
+
+推荐 2：toast 的价值在于「离开屏幕回来还能看到」，声音这件事挂件做得更精确（只在状态真的变化时响一次，而不是循环）。
 
 ### 无头 CLI
 

@@ -13,6 +13,7 @@
 mod discover;
 mod hooks;
 mod persist;
+mod sound;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -70,6 +71,9 @@ struct AppView {
 }
 
 type Store = Arc<Mutex<HashMap<String, Session>>>;
+
+/// 用户偏好。托盘改它、HTTP 线程读它，所以要共享。
+type PrefsState = Arc<Mutex<persist::Prefs>>;
 
 /// 窗口右下角锚点 (right, bottom)。折叠/展开会同时改宽高，存左上角的话
 /// 挂件每次重启会按当时的折叠状态上下左右漂移。恢复时反算左上角。
@@ -163,7 +167,12 @@ fn classify(v: &Value) -> Option<(String, String)> {
     }
 }
 
-fn handle_event(store: &Store, v: &Value) {
+/// 返回 true 表示该响一声提示音：状态**变成**了某个等待态。
+///
+/// 判据是 `新状态是 waiting 且不等于旧状态`：
+/// - 同一等待态的重复事件不响 —— 否则一串事件会连成噪音
+/// - `waiting-permission` → `waiting-input` 会响，因为要你处理的事情换了
+fn handle_event(store: &Store, v: &Value) -> bool {
     let sid = v
         .get("session_id")
         .and_then(Value::as_str)
@@ -175,27 +184,36 @@ fn handle_event(store: &Store, v: &Value) {
         if let Ok(mut m) = store.lock() {
             m.remove(&sid);
         }
-        return;
+        return false;
     }
 
-    if let Some((state, detail)) = classify(v) {
-        let project = project_of(v.get("cwd").and_then(Value::as_str).unwrap_or(""));
-        let now = now_ms();
-        if let Ok(mut m) = store.lock() {
-            // first_seen 只在第一次出现时写，后续更新要保留 —— 否则图标顺序会变
-            let first_seen = m.get(&sid).map(|s| s.first_seen).unwrap_or(now);
-            m.insert(
-                sid,
-                Session {
-                    project,
-                    state,
-                    detail,
-                    first_seen,
-                    updated_ms: now,
-                },
-            );
-        }
-    }
+    let Some((state, detail)) = classify(v) else {
+        return false;
+    };
+    let project = project_of(v.get("cwd").and_then(Value::as_str).unwrap_or(""));
+    let now = now_ms();
+
+    let Ok(mut m) = store.lock() else { return false };
+
+    // 先把要用的旧值取出来，再 insert —— 不然 get 的借用和 insert 的可变借用冲突
+    let (first_seen, prev_state) = match m.get(&sid) {
+        // first_seen 只在第一次出现时写，后续更新要保留 —— 否则图标顺序会变
+        Some(s) => (s.first_seen, Some(s.state.clone())),
+        None => (now, None),
+    };
+    let notify = state.starts_with("waiting") && prev_state.as_deref() != Some(state.as_str());
+
+    m.insert(
+        sid,
+        Session {
+            project,
+            state,
+            detail,
+            first_seen,
+            updated_ms: now,
+        },
+    );
+    notify
 }
 
 fn empty_view() -> AppView {
@@ -366,7 +384,7 @@ fn resize_pet(app: AppHandle, width: f64, height: f64) -> Result<(), String> {
 
 // ── HTTP 监听 ────────────────────────────────────────────────
 
-fn spawn_server(app: AppHandle, store: Store) {
+fn spawn_server(app: AppHandle, store: Store, prefs: PrefsState) {
     std::thread::spawn(move || {
         let server = match tiny_http::Server::http(("127.0.0.1", PORT)) {
             Ok(s) => s,
@@ -385,8 +403,27 @@ fn spawn_server(app: AppHandle, store: Store) {
             let _ = req.as_reader().read_to_string(&mut body);
 
             if let Ok(v) = serde_json::from_str::<Value>(&body) {
-                handle_event(&store, &v);
+                let notify = handle_event(&store, &v);
                 let _ = app.emit("pet://view", build_view(&store));
+
+                if notify {
+                    // 读不到偏好时按「静音」处理：宁可漏一声，也不要在用户
+                    // 已经设了静音的情况下因为读取失败而响。
+                    let want = prefs
+                        .lock()
+                        .ok()
+                        .filter(|p| !p.muted)
+                        .map(|p| p.sound.clone());
+                    // 这两行日志是「为什么没响」唯一可查的线索 —— 声音本身
+                    // 不留痕迹，出问题时没有别的地方能看。
+                    match want {
+                        Some(alias) => {
+                            eprintln!("[claude-pet] sound: {alias}");
+                            sound::play(&alias);
+                        }
+                        None => eprintln!("[claude-pet] sound suppressed (muted)"),
+                    }
+                }
             }
 
             // 必须回 2xx 空 body —— 官方约定这等价于 exit 0 无输出，
@@ -450,7 +487,7 @@ fn restore_position(win: &WebviewWindow, app: &AppHandle) {
 
 // ── 托盘 ─────────────────────────────────────────────────────
 
-fn build_tray(app: &tauri::App) -> tauri::Result<()> {
+fn build_tray(app: &tauri::App, prefs: PrefsState) -> tauri::Result<()> {
     let version = app.package_info().version.to_string();
 
     // is_enabled 会真的去读 HKCU\...\Run，所以这行日志能证明插件是通的
@@ -475,12 +512,23 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     )?;
     let autostart_item =
         CheckMenuItem::with_id(app, "autostart", "开机自启", true, autostart_on, None::<&str>)?;
+
+    // 正向表述：勾上 = 会响。比「静音」勾上=不响少一层反向理解。
+    let sound_on = !prefs.lock().map(|p| p.muted).unwrap_or(false);
+    let sound_item =
+        CheckMenuItem::with_id(app, "sound", "提示音", true, sound_on, None::<&str>)?;
+
     let sep = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", "退出 Claude Pet", true, None::<&str>)?;
 
-    let menu = Menu::with_items(app, &[&version_item, &sep, &autostart_item, &quit])?;
+    let menu = Menu::with_items(
+        app,
+        &[&version_item, &sep, &autostart_item, &sound_item, &quit],
+    )?;
 
     let check_handle = autostart_item.clone();
+    let sound_handle = sound_item.clone();
+    let prefs_for_menu = prefs.clone();
     let mut tray = TrayIconBuilder::new()
         .menu(&menu)
         .tooltip(format!("Claude Pet v{version}"))
@@ -500,6 +548,23 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
                         let _ = check_handle.set_checked(!currently_on);
                     }
                     Err(e) => eprintln!("[claude-pet] autostart toggle failed: {e}"),
+                }
+            }
+            "sound" => {
+                let mut now_on = false;
+                if let Ok(mut p) = prefs_for_menu.lock() {
+                    p.muted = !p.muted;
+                    now_on = !p.muted;
+                    persist::save_prefs(app, &p);
+                }
+                let _ = sound_handle.set_checked(now_on);
+                // 打开时立刻试听一声，这样用户知道自己听到的是什么
+                if now_on {
+                    let alias = prefs_for_menu
+                        .lock()
+                        .map(|p| p.sound.clone())
+                        .unwrap_or_else(|_| sound::DEFAULT_ALIAS.to_string());
+                    sound::play(&alias);
                 }
             }
             _ => {}
@@ -645,6 +710,8 @@ fn handle_autostart_cli(app: &tauri::App) -> Option<i32> {
 fn main() {
     let store: Store = Arc::new(Mutex::new(HashMap::new()));
     let anchor: AnchorState = Arc::new(Mutex::new(None));
+    // 真正的值在 setup 里从磁盘读 —— 那时才拿得到 AppHandle 来解析配置目录
+    let prefs: PrefsState = Arc::new(Mutex::new(persist::Prefs::default()));
 
     tauri::Builder::default()
         .plugin(tauri_plugin_autostart::init(
@@ -664,10 +731,16 @@ fn main() {
                 std::process::exit(code);
             }
 
-            // 窗口没有标题栏也不在任务栏，托盘是唯一的退出入口 —— 不能省。
-            build_tray(app)?;
-
             let handle = app.handle().clone();
+
+            // 偏好要在建托盘之前读 —— 托盘的「提示音」勾选状态来自它
+            if let Ok(mut p) = prefs.lock() {
+                *p = persist::load_prefs(&handle);
+                eprintln!("[claude-pet] prefs: muted={} sound={}", p.muted, p.sound);
+            }
+
+            // 窗口没有标题栏也不在任务栏，托盘是唯一的退出入口 —— 不能省。
+            build_tray(app, prefs.clone())?;
 
             // 缓存必须在 spawn_discovery 之前加载。
             //
@@ -748,7 +821,7 @@ fn main() {
                 });
             }
 
-            spawn_server(handle.clone(), store.clone());
+            spawn_server(handle.clone(), store.clone(), prefs.clone());
             spawn_discovery(handle, store.clone());
             Ok(())
         })

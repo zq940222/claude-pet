@@ -10,6 +10,16 @@
 
 ### Added
 
+- **提示音与静音开关**（#4）—— 进入等待态时响一声，托盘可开关。
+  - **只在状态「变成」等待态时响**：判据是「新状态是 waiting 且不等于旧状态」。同一等待态的重复事件不响（否则连成噪音），但 `waiting-permission` ↔ `waiting-input` 会响，因为要你处理的事情换了。实测 8 个事件的转换序列响 3 次
+  - 直接 FFI 调 winmm 的 `PlaySoundW` 播放 Windows 声音方案里已有的系统音：**不引入音频 crate、零字节体积增量**，且自动尊重系统里配的声音和音量。release exe 从 3.37 MB 到 3.45 MB，增量全部来自本轮几个新模块而非音频
+  - 带 `SND_NODEFAULT`：用户把某事件设成「无声音」是明确意图，不退回蜂鸣
+  - 用完即弃的线程里同步播放，而不是 `SND_ASYNC` —— 异步模式下字符串指针的生命周期要求无法从文档确证，而「大概没问题」不足以拿来写 unsafe
+  - 静音状态存 `prefs.json`，跨重启保留；打开时试听一声
+  - `sound` 字段手改写错时启动警告并回落 —— `SND_NODEFAULT` 下打错字是静默无声的，不校验用户只会以为功能坏了
+  - 新增 `prefs.json` **刻意不用** `version` 门禁（与会话缓存相反）：偏好是用户意图，加字段时必须让旧文件继续可读，靠 `#[serde(default)]` 实现。已验证缺字段的旧格式能被正确补齐
+  - README 记录了与 toast 脚本的声音重叠及三个处理选择
+
 - **hook 一键安装 / 卸载**（#3）—— 新增 `--install-hooks` / `--uninstall-hooks` / `--hooks-status`，消掉了上手路径上唯一需要手工编辑 JSON 的一步。`install.ps1` 加了 `-WireHooks` 开关，`-Uninstall` 现在也会顺带摘掉 hook。
   - **合并而不是覆盖**：serde_json 开 `preserve_order` + 2 空格 pretty 打印，实测对真实 settings.json（4542 字节、含 `statusLine` 和 24 个 plugin）是逐字节一致的往返；不开这个 feature 的话默认 Map 会按字母序重排用户所有的键
   - **幂等**：判重看 hook url；且「没变就不写」，所以重装不会刷出多余备份

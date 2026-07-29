@@ -105,6 +105,79 @@ pub fn load_sessions(
         .collect()
 }
 
+// ── 用户偏好 ─────────────────────────────────────────────────
+
+/// 用户偏好。
+///
+/// 这里**刻意不用**会话缓存那套 `version` 门禁：偏好是用户的意图，加字段时
+/// 必须让旧文件继续可读，不能整份丢掉（丢掉等于把用户的设置悄悄重置）。
+/// 所以每个字段都带 `#[serde(default)]`，新增字段对旧文件就是取默认值。
+///
+/// 会话缓存反过来 —— 它是可丢弃的派生数据，宁可整份丢掉也不要半对半错。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Prefs {
+    /// 静音。等待态提示音的总开关。
+    #[serde(default)]
+    pub muted: bool,
+    /// 提示音用的 Windows 声音方案事件名，见 `sound::AVAILABLE`。
+    #[serde(default = "default_sound")]
+    pub sound: String,
+}
+
+fn default_sound() -> String {
+    crate::sound::DEFAULT_ALIAS.to_string()
+}
+
+impl Default for Prefs {
+    fn default() -> Self {
+        Self {
+            muted: false,
+            sound: default_sound(),
+        }
+    }
+}
+
+const PREFS_FILE: &str = "prefs.json";
+
+pub fn load_prefs(app: &AppHandle) -> Prefs {
+    let Some(path) = config_path(app, PREFS_FILE) else {
+        return Prefs::default();
+    };
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return Prefs::default();
+    };
+    let mut prefs = match serde_json::from_str::<Prefs>(&raw) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("[claude-pet] prefs unreadable ({e}), using defaults");
+            return Prefs::default();
+        }
+    };
+
+    // 校验声音别名。prefs.json 是给人手改的，打错字的话 PlaySoundW 会
+    // 静默不响（我们刻意带了 SND_NODEFAULT），用户只会以为提示音坏了。
+    if !crate::sound::AVAILABLE.contains(&prefs.sound.as_str()) {
+        eprintln!(
+            "[claude-pet] unknown sound \"{}\", falling back to {} (valid: {})",
+            prefs.sound,
+            crate::sound::DEFAULT_ALIAS,
+            crate::sound::AVAILABLE.join(", ")
+        );
+        prefs.sound = default_sound();
+    }
+
+    prefs
+}
+
+pub fn save_prefs(app: &AppHandle, prefs: &Prefs) {
+    let Some(path) = config_path(app, PREFS_FILE) else {
+        return;
+    };
+    if let Ok(s) = serde_json::to_string_pretty(prefs) {
+        write_atomic(path, &s);
+    }
+}
+
 // ── 窗口锚点 ─────────────────────────────────────────────────
 
 /// 存右下角而不是左上角 —— 和 `resize_pet` 的锚定方向保持一致。
