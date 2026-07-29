@@ -1,0 +1,250 @@
+/* 设置窗口的样式。
+   跟 style.css 完全独立 —— 那套是给透明无边框挂件写的，body 是 flex 容器、
+   卡片靠 flex-shrink:0 顶出真实尺寸给窗口测量。这里是普通带标题栏的窗口，
+   需要不透明背景和正常的文档流滚动。 */
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background: #191b21;
+  color: #dfe4ec;
+  font-family: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI",
+    system-ui, sans-serif;
+  font-size: 13.5px;
+  line-height: 1.55;
+  overflow-y: auto;
+}
+
+#app {
+  max-width: 560px;
+  margin: 0 auto;
+  padding: 18px 20px 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* ── 分组 ───────────────────────────────────────────────── */
+
+.group {
+  background: #1f2229;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 10px;
+  padding: 14px 16px 16px;
+}
+
+.group h2 {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #7d8695;
+  margin-bottom: 10px;
+}
+
+/* ── 行 ─────────────────────────────────────────────────── */
+
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 30px;
+  padding: 3px 0;
+}
+
+/* label 元素本身可点，但只有真正含 input 的行才该有手型 */
+label.row {
+  cursor: pointer;
+}
+
+.label {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.control {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.unit {
+  color: #7d8695;
+  font-size: 12px;
+}
+
+.hint {
+  font-size: 11.5px;
+  color: #79818f;
+  margin: 2px 0 8px;
+}
+
+.hint:last-child {
+  margin-bottom: 0;
+}
+
+.hint code {
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 11px;
+  background: rgba(255, 255, 255, 0.06);
+  padding: 1px 4px;
+  border-radius: 3px;
+  /* 路径很长，允许在任意处断行，否则会把窗口顶宽 */
+  word-break: break-all;
+}
+
+.hint strong {
+  color: #c3cad5;
+}
+
+/* ── 控件 ───────────────────────────────────────────────── */
+
+input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: #4a9eff;
+  cursor: pointer;
+}
+
+input[type="number"],
+select {
+  background: #14161b;
+  color: #dfe4ec;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font: inherit;
+  font-size: 13px;
+}
+
+input[type="number"] {
+  width: 76px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+select {
+  min-width: 168px;
+  cursor: pointer;
+}
+
+input:focus-visible,
+select:focus-visible,
+button:focus-visible {
+  outline: 2px solid #4a9eff;
+  outline-offset: 1px;
+}
+
+input[type="number"]:invalid {
+  border-color: #ff5f56;
+}
+
+button {
+  background: rgba(255, 255, 255, 0.09);
+  color: #dfe4ec;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  padding: 4px 12px;
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: background 0.13s ease;
+}
+
+button:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.btn-slim {
+  padding: 4px 10px;
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: rgba(255, 95, 86, 0.22);
+  border-color: rgba(255, 95, 86, 0.5);
+}
+
+.badge {
+  display: inline-block;
+  padding: 2px 9px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.1);
+  color: #b9c1cd;
+}
+
+.badge.ok {
+  background: rgba(63, 207, 112, 0.18);
+  color: #6fe09a;
+}
+
+.badge.warn {
+  background: rgba(255, 176, 32, 0.18);
+  color: #ffc65c;
+}
+
+/* ── 关于 ───────────────────────────────────────────────── */
+
+.about {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 5px 14px;
+  font-size: 12.5px;
+}
+
+.about dt {
+  color: #79818f;
+  white-space: nowrap;
+}
+
+.about dd {
+  color: #c3cad5;
+  word-break: break-all;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 11.5px;
+}
+
+/* 路径和链接要能被选中复制 —— 没有 opener 插件，只能靠手动复制 */
+.selectable {
+  user-select: text;
+  cursor: text;
+}
+
+/* ── 保存提示 ───────────────────────────────────────────── */
+
+.toast {
+  position: fixed;
+  bottom: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(18, 20, 26, 0.96);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  padding: 6px 14px;
+  font-size: 12.5px;
+  color: #dfe4ec;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+}
+
+.toast.err {
+  border-color: rgba(255, 95, 86, 0.6);
+  color: #ff9d96;
+}

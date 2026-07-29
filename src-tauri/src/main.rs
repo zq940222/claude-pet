@@ -23,7 +23,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Emitter, LogicalSize, Manager, WebviewWindow};
+use tauri::{
+    AppHandle, Emitter, LogicalSize, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
+};
 use tauri_plugin_autostart::{ManagerExt as AutostartExt, MacosLauncher};
 
 /// 挂件监听端口。改这里的话记得同步改 ~/.claude/settings.json 里的 hook url。
@@ -323,7 +325,10 @@ fn merge_discovered(store: &Store, found: Vec<discover::Discovered>) -> usize {
 
 /// 后台线程里跑发现，扫完再 emit。不能放在 setup 的主路径上 ——
 /// 本机 54 个项目目录、651 个转录，扫描不该拖慢窗口出现。
-fn spawn_discovery(app: AppHandle, store: Store) {
+///
+/// 改了时间窗设置后会再调一次：对这个设置来说，「立即生效」只能是
+/// 用新窗口重扫一遍，光改数字对已经建好的会话表没有任何影响。
+fn spawn_discovery(app: AppHandle, store: Store, window: Duration) {
     std::thread::spawn(move || {
         let home = app.path().home_dir().ok();
         let Some(dir) = discover::projects_dir(home) else {
@@ -336,7 +341,7 @@ fn spawn_discovery(app: AppHandle, store: Store) {
         }
 
         let started = std::time::Instant::now();
-        let found = discover::scan(&dir, discover::DEFAULT_WINDOW);
+        let found = discover::scan(&dir, window);
         let scanned = found.len();
         let added = merge_discovered(&store, found);
 
@@ -485,9 +490,177 @@ fn restore_position(win: &WebviewWindow, app: &AppHandle) {
     position_bottom_right(win);
 }
 
+// ── 设置窗口 ─────────────────────────────────────────────────
+
+/// 托盘勾选项的句柄。
+///
+/// 「开机自启」和「提示音」这两个布尔开关同时出现在托盘和设置窗口里 ——
+/// 托盘适合高频快切，设置窗口需要完整可发现。既然出现在两处，就必须
+/// 保证两处一致：设置窗口改完要回写这两个勾选状态，否则托盘会骗人。
+struct TrayItems {
+    autostart: CheckMenuItem<tauri::Wry>,
+    sound: CheckMenuItem<tauri::Wry>,
+}
+
+type TrayState = Arc<Mutex<Option<TrayItems>>>;
+
+#[derive(Serialize)]
+struct AboutInfo {
+    version: String,
+    config_dir: String,
+    claude_settings: String,
+    repo: String,
+    port: u16,
+}
+
+/// 设置窗口一次性拿走它需要的全部东西，省得开好几个命令来回问。
+#[derive(Serialize)]
+struct SettingsView {
+    prefs: persist::Prefs,
+    sounds: Vec<String>,
+    window_min: u64,
+    window_max: u64,
+    autostart: bool,
+    hooks_installed: usize,
+    hooks_total: usize,
+    about: AboutInfo,
+}
+
+#[tauri::command]
+fn get_settings(app: AppHandle, prefs: tauri::State<PrefsState>) -> SettingsView {
+    let current = prefs.lock().map(|p| p.clone()).unwrap_or_default();
+    let (hooks_installed, hooks_total) = hooks::status(&app).unwrap_or((0, 0));
+
+    SettingsView {
+        prefs: current,
+        sounds: sound::AVAILABLE.iter().map(|s| s.to_string()).collect(),
+        window_min: persist::WINDOW_MIN,
+        window_max: persist::WINDOW_MAX,
+        autostart: app.autolaunch().is_enabled().unwrap_or(false),
+        hooks_installed,
+        hooks_total,
+        about: AboutInfo {
+            version: app.package_info().version.to_string(),
+            config_dir: persist::config_path(&app, "")
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
+            claude_settings: hooks::settings_path(&app)
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
+            repo: "https://github.com/zq940222/claude-pet".into(),
+            port: PORT,
+        },
+    }
+}
+
+#[tauri::command]
+fn apply_prefs(
+    app: AppHandle,
+    prefs_state: tauri::State<PrefsState>,
+    tray: tauri::State<TrayState>,
+    store: tauri::State<Store>,
+    incoming: persist::Prefs,
+) -> Result<(), String> {
+    let mut next = incoming;
+    // 前端传来的值不能信 —— 手改 prefs.json 和前端 bug 都可能给出越界值
+    next.sanitise();
+
+    let mut window_changed = false;
+    {
+        let mut p = prefs_state.lock().map_err(|_| "prefs lock poisoned")?;
+        window_changed = window_changed || p.discover_window_minutes != next.discover_window_minutes;
+        *p = next.clone();
+        persist::save_prefs(&app, &p);
+    }
+
+    // 托盘的勾选状态要跟着变，否则两处显示不一致
+    if let Ok(items) = tray.lock() {
+        if let Some(i) = items.as_ref() {
+            let _ = i.sound.set_checked(!next.muted);
+        }
+    }
+
+    // 时间窗变了就用新窗口重扫一遍，这才叫「立即生效」
+    if window_changed {
+        spawn_discovery(app.clone(), (*store).clone(), next.discover_window());
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+fn set_autostart(
+    app: AppHandle,
+    tray: tauri::State<TrayState>,
+    enabled: bool,
+) -> Result<(), String> {
+    let mgr = app.autolaunch();
+    let r = if enabled { mgr.enable() } else { mgr.disable() };
+    r.map_err(|e| e.to_string())?;
+
+    if let Ok(items) = tray.lock() {
+        if let Some(i) = items.as_ref() {
+            let _ = i.autostart.set_checked(enabled);
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn preview_sound(alias: String) {
+    // 只放白名单里的，别让前端把任意字符串塞进 PlaySoundW
+    if sound::AVAILABLE.contains(&alias.as_str()) {
+        sound::play(&alias);
+    }
+}
+
+#[tauri::command]
+fn set_hooks(app: AppHandle, install: bool) -> Result<String, String> {
+    let report = if install {
+        hooks::install(&app)?
+    } else {
+        hooks::uninstall(&app)?
+    };
+    Ok(if report.changed {
+        match report.backup {
+            Some(b) => format!("已更新，备份于 {}", b.display()),
+            None => "已更新".into(),
+        }
+    } else {
+        "无需改动".into()
+    })
+}
+
+/// 打开设置窗口。按需创建 —— 常驻一个隐藏的 WebView2 会白占几十 MB，
+/// 而挂件的卖点之一就是常驻内存小。
+fn open_settings(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("settings") {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+        return;
+    }
+    match WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("settings.html".into()))
+        .title("Claude Pet 设置")
+        .inner_size(540.0, 620.0)
+        .min_inner_size(460.0, 480.0)
+        .resizable(true)
+        .center()
+        // 设置窗口是普通窗口：要标题栏、要进任务栏、不置顶。
+        // 挂件那套透明/无边框/置顶的属性一个都不能带过来。
+        .decorations(true)
+        .always_on_top(false)
+        .skip_taskbar(false)
+        .build()
+    {
+        Ok(_) => {}
+        Err(e) => eprintln!("[claude-pet] cannot open settings window: {e}"),
+    }
+}
+
 // ── 托盘 ─────────────────────────────────────────────────────
 
-fn build_tray(app: &tauri::App, prefs: PrefsState) -> tauri::Result<()> {
+fn build_tray(app: &tauri::App, prefs: PrefsState, tray_state: TrayState) -> tauri::Result<()> {
     let version = app.package_info().version.to_string();
 
     // is_enabled 会真的去读 HKCU\...\Run，所以这行日志能证明插件是通的
@@ -519,12 +692,30 @@ fn build_tray(app: &tauri::App, prefs: PrefsState) -> tauri::Result<()> {
         CheckMenuItem::with_id(app, "sound", "提示音", true, sound_on, None::<&str>)?;
 
     let sep = PredefinedMenuItem::separator(app)?;
+    let sep2 = PredefinedMenuItem::separator(app)?;
+    let settings_item = MenuItem::with_id(app, "settings", "设置…", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出 Claude Pet", true, None::<&str>)?;
 
     let menu = Menu::with_items(
         app,
-        &[&version_item, &sep, &autostart_item, &sound_item, &quit],
+        &[
+            &version_item,
+            &sep,
+            &autostart_item,
+            &sound_item,
+            &sep2,
+            &settings_item,
+            &quit,
+        ],
     )?;
+
+    // 存下句柄，设置窗口改完偏好后要回写勾选状态
+    if let Ok(mut slot) = tray_state.lock() {
+        *slot = Some(TrayItems {
+            autostart: autostart_item.clone(),
+            sound: sound_item.clone(),
+        });
+    }
 
     let check_handle = autostart_item.clone();
     let sound_handle = sound_item.clone();
@@ -534,6 +725,7 @@ fn build_tray(app: &tauri::App, prefs: PrefsState) -> tauri::Result<()> {
         .tooltip(format!("Claude Pet v{version}"))
         .on_menu_event(move |app, event| match event.id().as_ref() {
             "quit" => app.exit(0),
+            "settings" => open_settings(app),
             "autostart" => {
                 let mgr = app.autolaunch();
                 let currently_on = mgr.is_enabled().unwrap_or(false);
@@ -712,6 +904,7 @@ fn main() {
     let anchor: AnchorState = Arc::new(Mutex::new(None));
     // 真正的值在 setup 里从磁盘读 —— 那时才拿得到 AppHandle 来解析配置目录
     let prefs: PrefsState = Arc::new(Mutex::new(persist::Prefs::default()));
+    let tray_state: TrayState = Arc::new(Mutex::new(None));
 
     tauri::Builder::default()
         .plugin(tauri_plugin_autostart::init(
@@ -720,7 +913,17 @@ fn main() {
             None,
         ))
         .manage(store.clone())
-        .invoke_handler(tauri::generate_handler![get_view, resize_pet])
+        .manage(prefs.clone())
+        .manage(tray_state.clone())
+        .invoke_handler(tauri::generate_handler![
+            get_view,
+            resize_pet,
+            get_settings,
+            apply_prefs,
+            set_autostart,
+            preview_sound,
+            set_hooks
+        ])
         .setup(move |app| {
             // 无头 CLI：安装脚本要用，也方便手工排查。
             // 自启那组必须从「安装后的」exe 调用 —— 插件注册的是当前 exe 的路径。
@@ -734,13 +937,18 @@ fn main() {
             let handle = app.handle().clone();
 
             // 偏好要在建托盘之前读 —— 托盘的「提示音」勾选状态来自它
+            let mut window = persist::Prefs::default().discover_window();
             if let Ok(mut p) = prefs.lock() {
                 *p = persist::load_prefs(&handle);
-                eprintln!("[claude-pet] prefs: muted={} sound={}", p.muted, p.sound);
+                window = p.discover_window();
+                eprintln!(
+                    "[claude-pet] prefs: muted={} sound={} window={}min",
+                    p.muted, p.sound, p.discover_window_minutes
+                );
             }
 
             // 窗口没有标题栏也不在任务栏，托盘是唯一的退出入口 —— 不能省。
-            build_tray(app, prefs.clone())?;
+            build_tray(app, prefs.clone(), tray_state.clone())?;
 
             // 缓存必须在 spawn_discovery 之前加载。
             //
@@ -748,7 +956,7 @@ fn main() {
             // 所以先进来的缓存自动胜出。这是想要的方向 —— 缓存带着真实的状态和
             // detail，而扫描只能确定「这个会话存在」，状态一律填 idle。
             // 反过来的话，重启后所有宠物都会被扫描结果刷成灰色。
-            let restored = persist::load_sessions(&handle, discover::DEFAULT_WINDOW, now_ms());
+            let restored = persist::load_sessions(&handle, window, now_ms());
             let restored_count = restored.len();
             if restored_count > 0 {
                 if let Ok(mut map) = store.lock() {
@@ -756,6 +964,12 @@ fn main() {
                 }
             }
             eprintln!("[claude-pet] session cache: {restored_count} restored");
+
+            // `--settings` 启动即打开设置窗口。和上面那些 CLI 开关不同，
+            // 这个**不退出**，挂件照常起 —— 它是个入口而不是一次性命令。
+            if std::env::args().any(|a| a == "--settings") {
+                open_settings(&handle);
+            }
 
             if let Some(win) = app.get_webview_window("pet") {
                 // 窗口在 config 里是 visible:false，先摆好位置再 show，
@@ -822,7 +1036,7 @@ fn main() {
             }
 
             spawn_server(handle.clone(), store.clone(), prefs.clone());
-            spawn_discovery(handle, store.clone());
+            spawn_discovery(handle, store.clone(), window);
             Ok(())
         })
         .run(tauri::generate_context!())

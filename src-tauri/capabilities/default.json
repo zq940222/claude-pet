@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "挂件窗口需要的最小权限集",
-  "windows": ["pet"],
+  "description": "挂件窗口和设置窗口需要的最小权限集",
+  "windows": ["pet", "settings"],
   "permissions": [
     "core:default",
     "core:event:allow-listen",

@@ -27,11 +27,8 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// 只认最近这段时间内动过的转录。本机有 651 个历史转录，不设窗口会一次
-/// 冒出几十个早已关掉的会话。
-///
-/// TODO(#5): 设置窗口做好后改成可配。
-pub const DEFAULT_WINDOW: Duration = Duration::from_secs(30 * 60);
+// 时间窗由调用方传入，默认值和范围在 `persist::Prefs`（设置窗口可改）。
+// 必须设窗口：本机有 651 个历史转录，不限制会一次冒出几十个早已关掉的会话。
 
 /// 每个文件最多读这么多字节找 `cwd`。实测 `cwd` 稳定出现在第 3–5 行，
 /// 但单行可能很大（大的工具输出），所以按字节封顶而不是只按行数封顶 ——

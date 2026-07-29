@@ -122,18 +122,48 @@ pub struct Prefs {
     /// 提示音用的 Windows 声音方案事件名，见 `sound::AVAILABLE`。
     #[serde(default = "default_sound")]
     pub sound: String,
+    /// 会话自动发现的时间窗（分钟）。只认这段时间内动过的转录 ——
+    /// 本机有 651 个历史转录，窗口太大会一次冒出几十个早已关掉的会话。
+    #[serde(default = "default_window_minutes")]
+    pub discover_window_minutes: u64,
 }
 
 fn default_sound() -> String {
     crate::sound::DEFAULT_ALIAS.to_string()
 }
 
+fn default_window_minutes() -> u64 {
+    30
+}
+
+/// 时间窗的合法范围。上限不是随便定的：本机 651 个转录里，窗口开到
+/// 一天以上就会把大量早已关掉的会话拉回来，挂件反而没法看。
+pub const WINDOW_MIN: u64 = 1;
+pub const WINDOW_MAX: u64 = 1440;
+
 impl Default for Prefs {
     fn default() -> Self {
         Self {
             muted: false,
             sound: default_sound(),
+            discover_window_minutes: default_window_minutes(),
         }
+    }
+}
+
+impl Prefs {
+    pub fn discover_window(&self) -> Duration {
+        Duration::from_secs(self.discover_window_minutes.clamp(WINDOW_MIN, WINDOW_MAX) * 60)
+    }
+
+    /// 收敛非法值。前端和手改的文件都可能给出越界的东西。
+    pub fn sanitise(&mut self) {
+        if !crate::sound::AVAILABLE.contains(&self.sound.as_str()) {
+            self.sound = default_sound();
+        }
+        self.discover_window_minutes = self
+            .discover_window_minutes
+            .clamp(WINDOW_MIN, WINDOW_MAX);
     }
 }
 
@@ -164,6 +194,15 @@ pub fn load_prefs(app: &AppHandle) -> Prefs {
             crate::sound::AVAILABLE.join(", ")
         );
         prefs.sound = default_sound();
+    }
+
+    let before = prefs.discover_window_minutes;
+    prefs.sanitise();
+    if before != prefs.discover_window_minutes {
+        eprintln!(
+            "[claude-pet] discover window {before} out of range, clamped to {}",
+            prefs.discover_window_minutes
+        );
     }
 
     prefs

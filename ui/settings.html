@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Claude Pet 设置</title>
+    <!-- 刻意不引 style.css：那套是给透明无边框挂件写的，
+         里面的 body flex 布局和 flex-shrink 测量逻辑会把普通窗口坑掉 -->
+    <link rel="stylesheet" href="settings.css" />
+  </head>
+  <body>
+    <main id="app">
+      <section class="group">
+        <h2>通用</h2>
+
+        <label class="row">
+          <span class="label">开机自启</span>
+          <input type="checkbox" id="autostart" />
+        </label>
+        <p class="hint">
+          注册到 <code>HKCU\Software\Microsoft\Windows\CurrentVersion\Run</code>，
+          记录的是当前 exe 的路径。
+        </p>
+
+        <label class="row">
+          <span class="label">会话发现时间窗</span>
+          <span class="control">
+            <input type="number" id="window" min="1" max="1440" step="1" />
+            <span class="unit">分钟</span>
+          </span>
+        </label>
+        <p class="hint" id="windowHint">
+          启动时只把这段时间内活动过的会话恢复出来。改完会立刻用新窗口重扫一遍。
+        </p>
+      </section>
+
+      <section class="group">
+        <h2>提示音</h2>
+
+        <label class="row">
+          <span class="label">进入等待态时提示</span>
+          <input type="checkbox" id="soundOn" />
+        </label>
+        <p class="hint">
+          只在状态「变成」等待态时响一次，同一等待态的重复事件不响。
+        </p>
+
+        <label class="row">
+          <span class="label">声音</span>
+          <span class="control">
+            <select id="sound"></select>
+            <button type="button" id="preview" class="btn-slim">试听</button>
+          </span>
+        </label>
+        <p class="hint">
+          用的是 Windows 声音方案里已有的系统音，所以跟随你在系统设置里配的声音和音量。
+        </p>
+      </section>
+
+      <section class="group">
+        <h2>Hooks</h2>
+
+        <div class="row">
+          <span class="label">安装状态</span>
+          <span class="control">
+            <span id="hooksStatus" class="badge">读取中…</span>
+          </span>
+        </div>
+        <div class="row">
+          <span class="label"></span>
+          <span class="control">
+            <button type="button" id="installHooks">安装</button>
+            <button type="button" id="uninstallHooks" class="btn-danger">卸载</button>
+          </span>
+        </div>
+        <p class="hint">
+          写入 <code id="claudeSettings"></code>。改动前会备份，只增删指向本挂件端口的条目，
+          其它配置不动。<strong>hook 在会话启动时加载，所以要开一个新的 Claude Code 会话才生效。</strong>
+        </p>
+      </section>
+
+      <section class="group">
+        <h2>关于</h2>
+        <dl class="about">
+          <dt>版本</dt><dd id="version"></dd>
+          <dt>监听端口</dt><dd id="port"></dd>
+          <dt>配置目录</dt><dd id="configDir" class="selectable"></dd>
+          <dt>仓库</dt><dd id="repo" class="selectable"></dd>
+        </dl>
+      </section>
+    </main>
+
+    <div id="toast" class="toast" hidden></div>
+    <script src="settings.js"></script>
+  </body>
+</html>
