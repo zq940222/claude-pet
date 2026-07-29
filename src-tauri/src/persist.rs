@@ -140,9 +140,16 @@ pub struct Prefs {
     /// 跳到下一个在等你的会话。空串 = 不注册。
     #[serde(default = "default_shortcut_next")]
     pub shortcut_next: String,
+    /// 界面语言：`"auto"` / `"zh"` / `"en"`。auto 时按系统 UI 语言猜。
+    #[serde(default = "default_lang")]
+    pub lang: String,
 }
 
 fn default_editor() -> String {
+    "auto".to_string()
+}
+
+fn default_lang() -> String {
     "auto".to_string()
 }
 
@@ -176,6 +183,7 @@ impl Default for Prefs {
             editor: default_editor(),
             shortcut_toggle: default_shortcut_toggle(),
             shortcut_next: default_shortcut_next(),
+            lang: default_lang(),
         }
     }
 }
@@ -198,6 +206,13 @@ impl Prefs {
         {
             self.editor = default_editor();
         }
+        if !matches!(self.lang.as_str(), "auto" | "zh" | "en") {
+            self.lang = default_lang();
+        }
+    }
+
+    pub fn resolved_lang(&self) -> crate::i18n::Lang {
+        crate::i18n::Lang::resolve(&self.lang)
     }
 }
 

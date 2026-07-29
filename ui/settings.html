@@ -3,118 +3,115 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Claude Pet 设置</title>
+    <title>Claude Pet</title>
     <!-- 刻意不引 style.css：那套是给透明无边框挂件写的，
          里面的 body flex 布局和 flex-shrink 测量逻辑会把普通窗口坑掉 -->
     <link rel="stylesheet" href="settings.css" />
   </head>
-  <body>
+  <body data-i18n-doctitle="set.title">
     <main id="app">
       <section class="group">
-        <h2>通用</h2>
+        <h2 data-i18n="set.general"></h2>
 
         <label class="row">
-          <span class="label">开机自启</span>
+          <span class="label" data-i18n="set.autostart"></span>
           <input type="checkbox" id="autostart" />
         </label>
-        <p class="hint">
-          注册到 <code>HKCU\Software\Microsoft\Windows\CurrentVersion\Run</code>，
-          记录的是当前 exe 的路径。
-        </p>
+        <p class="hint" data-i18n-html="set.autostartHint"></p>
 
         <label class="row">
-          <span class="label">会话发现时间窗</span>
+          <span class="label" data-i18n="set.window"></span>
           <span class="control">
             <input type="number" id="window" min="1" max="1440" step="1" />
-            <span class="unit">分钟</span>
+            <span class="unit" data-i18n="set.minutes"></span>
           </span>
         </label>
-        <p class="hint" id="windowHint">
-          启动时只把这段时间内活动过的会话恢复出来。改完会立刻用新窗口重扫一遍。
-        </p>
+        <p class="hint" id="windowHint"></p>
 
         <label class="row">
-          <span class="label">双击宠物时打开</span>
+          <span class="label" data-i18n="set.editor"></span>
           <span class="control">
             <select id="editor"></select>
           </span>
         </label>
         <p class="hint" id="editorHint"></p>
-      </section>
-
-      <section class="group">
-        <h2>提示音</h2>
 
         <label class="row">
-          <span class="label">进入等待态时提示</span>
-          <input type="checkbox" id="soundOn" />
-        </label>
-        <p class="hint">
-          只在状态「变成」等待态时响一次，同一等待态的重复事件不响。
-        </p>
-
-        <label class="row">
-          <span class="label">声音</span>
+          <span class="label" data-i18n="set.lang"></span>
           <span class="control">
-            <select id="sound"></select>
-            <button type="button" id="preview" class="btn-slim">试听</button>
+            <select id="lang">
+              <option value="auto" data-i18n="set.langAuto"></option>
+              <option value="zh">简体中文</option>
+              <option value="en">English</option>
+            </select>
           </span>
         </label>
-        <p class="hint">
-          用的是 Windows 声音方案里已有的系统音，所以跟随你在系统设置里配的声音和音量。
-        </p>
+        <p class="hint" data-i18n="set.langHint"></p>
       </section>
 
       <section class="group">
-        <h2>全局快捷键</h2>
+        <h2 data-i18n="set.sound"></h2>
 
         <label class="row">
-          <span class="label">展开 / 收起挂件</span>
+          <span class="label" data-i18n="set.soundOn"></span>
+          <input type="checkbox" id="soundOn" />
+        </label>
+        <p class="hint" data-i18n="set.soundOnHint"></p>
+
+        <label class="row">
+          <span class="label" data-i18n="set.soundPick"></span>
+          <span class="control">
+            <select id="sound"></select>
+            <button type="button" id="preview" class="btn-slim" data-i18n="set.preview"></button>
+          </span>
+        </label>
+        <p class="hint" data-i18n="set.soundHint"></p>
+      </section>
+
+      <section class="group">
+        <h2 data-i18n="set.shortcuts"></h2>
+
+        <label class="row">
+          <span class="label" data-i18n="set.scToggle"></span>
           <span class="control">
             <input type="text" id="scToggle" class="accel" spellcheck="false" />
           </span>
         </label>
 
         <label class="row">
-          <span class="label">跳到下一个在等你的会话</span>
+          <span class="label" data-i18n="set.scNext"></span>
           <span class="control">
             <input type="text" id="scNext" class="accel" spellcheck="false" />
           </span>
         </label>
 
-        <p class="hint">
-          写法如 <code>Ctrl+Alt+P</code>、<code>Ctrl+Shift+F9</code>。留空表示不注册。
-          被别的程序占用时会在下方提示，且不影响另一个快捷键。
-        </p>
+        <p class="hint" data-i18n-html="set.scHint"></p>
       </section>
 
       <section class="group">
-        <h2>Hooks</h2>
+        <h2 data-i18n="set.hooks"></h2>
 
         <div class="row">
-          <span class="label">安装状态</span>
+          <span class="label" data-i18n="set.hooksStatus"></span>
           <span class="control">
-            <span id="hooksStatus" class="badge">读取中…</span>
+            <span id="hooksStatus" class="badge" data-i18n="set.reading"></span>
           </span>
         </div>
         <div class="row">
           <span class="label"></span>
           <span class="control">
-            <button type="button" id="installHooks">安装</button>
-            <button type="button" id="uninstallHooks" class="btn-danger">卸载</button>
+            <button type="button" id="installHooks" data-i18n="set.install"></button>
+            <button type="button" id="uninstallHooks" class="btn-danger" data-i18n="set.uninstall"></button>
           </span>
         </div>
-        <p class="hint">
-          写入 <code id="claudeSettings"></code>。改动前会备份，只增删指向本挂件端口的条目，
-          其它配置不动。<strong>hook 在会话启动时加载，所以要开一个新的 Claude Code 会话才生效。</strong>
-        </p>
+        <p class="hint" id="hooksHint"></p>
 
         <label class="row">
-          <span class="label">在挂件上批准权限</span>
+          <span class="label" data-i18n="set.permOn"></span>
           <input type="checkbox" id="permOn" />
         </label>
         <label class="row">
-          <span class="label">拦截哪些工具</span>
+          <span class="label" data-i18n="set.permMatcher"></span>
           <span class="control">
             <input type="text" id="permMatcher" class="accel" spellcheck="false" placeholder="Bash" />
           </span>
@@ -123,17 +120,18 @@
       </section>
 
       <section class="group">
-        <h2>关于</h2>
+        <h2 data-i18n="set.about"></h2>
         <dl class="about">
-          <dt>版本</dt><dd id="version"></dd>
-          <dt>监听端口</dt><dd id="port"></dd>
-          <dt>配置目录</dt><dd id="configDir" class="selectable"></dd>
-          <dt>仓库</dt><dd id="repo" class="selectable"></dd>
+          <dt data-i18n="set.version"></dt><dd id="version"></dd>
+          <dt data-i18n="set.port"></dt><dd id="port"></dd>
+          <dt data-i18n="set.configDir"></dt><dd id="configDir" class="selectable"></dd>
+          <dt data-i18n="set.repo"></dt><dd id="repo" class="selectable"></dd>
         </dl>
       </section>
     </main>
 
     <div id="toast" class="toast" hidden></div>
+    <script src="i18n.js"></script>
     <script src="settings.js"></script>
   </body>
 </html>

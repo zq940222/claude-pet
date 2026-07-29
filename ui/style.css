@@ -507,6 +507,13 @@ body {
   gap: 4px;
 }
 
+/* 这条不能删。上面的 `display: flex` 是作者样式，会盖过浏览器 UA 样式表里的
+   `[hidden] { display: none }` —— 少了这条，`hidden` 属性对它完全无效，
+   没有权限请求时也会一直显示「允许/拒绝」两个按钮（点了什么也不会发生）。 */
+.actions[hidden] {
+  display: none;
+}
+
 .act {
   border: 1px solid rgba(255, 255, 255, 0.16);
   border-radius: 5px;

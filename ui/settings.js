@@ -2,8 +2,11 @@
 //
 // 每一项改完立刻落盘并生效，没有「保存」按钮 —— 设置项都是独立开关，
 // 攒着一起提交只会让人怀疑到底存没存。
+//
+// 文案全部走 i18n.js 的 t()，HTML 里的静态文本靠 data-i18n 属性。
 
 const el = (id) => document.getElementById(id);
+const t = (k, v) => window.I18N.t(k, v);
 
 const ui = {
   autostart: el("autostart"),
@@ -11,6 +14,7 @@ const ui = {
   windowHint: el("windowHint"),
   editor: el("editor"),
   editorHint: el("editorHint"),
+  lang: el("lang"),
   scToggle: el("scToggle"),
   scNext: el("scNext"),
   soundOn: el("soundOn"),
@@ -19,10 +23,10 @@ const ui = {
   hooksStatus: el("hooksStatus"),
   installHooks: el("installHooks"),
   uninstallHooks: el("uninstallHooks"),
+  hooksHint: el("hooksHint"),
   permOn: el("permOn"),
   permMatcher: el("permMatcher"),
   permHint: el("permHint"),
-  claudeSettings: el("claudeSettings"),
   version: el("version"),
   port: el("port"),
   configDir: el("configDir"),
@@ -40,25 +44,28 @@ function toast(msg, isError) {
   ui.toast.classList.toggle("err", !!isError);
   ui.toast.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => {
-    ui.toast.hidden = true;
-  }, isError ? 4000 : 1600);
+  toastTimer = setTimeout(
+    () => {
+      ui.toast.hidden = true;
+    },
+    isError ? 4000 : 1600
+  );
 }
 
 /// 把当前 prefs 整体推给 Rust。Rust 侧会 sanitise，所以越界值不会落盘。
 ///
 /// 返回的是警告列表而不是错误：一个快捷键被占用不该让别的设置也存不下去，
 /// 所以那种情况走 warning，而 toast 要把它显示成红色 —— 否则用户会以为设好了。
-async function apply(what) {
+async function apply(whatKey) {
   try {
     const warnings = await invoke("apply_prefs", { incoming: prefs });
     if (Array.isArray(warnings) && warnings.length) {
-      toast(warnings.join("；"), true);
+      toast(warnings.join(" / "), true);
     } else {
-      toast(what ? `${what}已保存` : "已保存");
+      toast(whatKey ? t("set.savedWhat", { what: t(whatKey) }) : t("set.saved"));
     }
   } catch (e) {
-    toast(`保存失败: ${e}`, true);
+    toast(t("set.saveFailed", { err: e }), true);
   }
 }
 
@@ -71,12 +78,20 @@ function renderHooks(installed, total) {
   ui.uninstallHooks.disabled = installed === 0;
 }
 
+function renderPerm(matcher) {
+  const on = matcher !== null && matcher !== undefined;
+  ui.permOn.checked = on;
+  ui.permMatcher.value = on ? matcher : "Bash";
+  ui.permMatcher.disabled = !on;
+}
+
 async function refreshHooks() {
   try {
     const v = await invoke("get_settings");
     renderHooks(v.hooks_installed, v.hooks_total);
+    renderPerm(v.permission_matcher);
   } catch (e) {
-    ui.hooksStatus.textContent = "读取失败";
+    ui.hooksStatus.textContent = t("set.readFail");
   }
 }
 
@@ -88,16 +103,18 @@ function fill(v) {
   ui.window.min = v.window_min;
   ui.window.max = v.window_max;
   ui.window.value = prefs.discover_window_minutes;
-  ui.windowHint.textContent =
-    `启动时只把这段时间内活动过的会话恢复出来（${v.window_min}–${v.window_max} 分钟）。` +
-    `改完会立刻用新窗口重扫一遍。`;
+  ui.windowHint.textContent = t("set.windowHint", {
+    min: v.window_min,
+    max: v.window_max,
+  });
 
   // 只列本机实际装了的。列出没装的选项等于埋一个「选了却不工作」的坑。
   ui.editor.textContent = "";
   const auto = document.createElement("option");
   auto.value = "auto";
-  auto.textContent =
-    v.editors.length ? `自动（${v.editors[0].label}）` : "自动（未找到编辑器）";
+  auto.textContent = v.editors.length
+    ? t("set.editorAuto", { first: v.editors[0].label })
+    : t("set.editorAutoNone");
   ui.editor.appendChild(auto);
   for (const e of v.editors) {
     const o = document.createElement("option");
@@ -111,8 +128,10 @@ function fill(v) {
   ui.editor.value = known.includes(prefs.editor) ? prefs.editor : "auto";
   ui.editor.disabled = v.editors.length === 0;
   ui.editorHint.textContent = v.editors.length
-    ? `双击宠物在对应项目里打开。已找到：${v.editors.map((e) => e.label).join("、")}。`
-    : "PATH 上没找到 Cursor / VS Code / JetBrains 的命令行工具，双击不会有反应。";
+    ? t("set.editorFound", { list: v.editors.map((e) => e.label).join(" / ") })
+    : t("set.editorNone");
+
+  ui.lang.value = prefs.lang;
 
   ui.scToggle.value = prefs.shortcut_toggle;
   ui.scNext.value = prefs.shortcut_next;
@@ -130,20 +149,10 @@ function fill(v) {
   ui.preview.disabled = prefs.muted;
 
   renderHooks(v.hooks_installed, v.hooks_total);
+  renderPerm(v.permission_matcher);
+  ui.hooksHint.innerHTML = t("set.hooksHint", { path: v.about.claude_settings });
+  ui.permHint.innerHTML = t("set.permHint", { secs: v.permission_wait_secs });
 
-  // 权限拦截：装了就是 Some(matcher)，没装是 null
-  const permMatcher = v.permission_matcher;
-  ui.permOn.checked = permMatcher !== null && permMatcher !== undefined;
-  ui.permMatcher.value = ui.permOn.checked ? permMatcher : "Bash";
-  ui.permMatcher.disabled = !ui.permOn.checked;
-  ui.permHint.innerHTML =
-    `匹配到的工具调用会<strong>挂住等你在挂件上点允许/拒绝</strong>，最多 ${v.permission_wait_secs} 秒后` +
-    `交回 Claude Code 自己的权限流程。所以挂件没开或人不在时不会把 Claude Code 卡死，` +
-    `代价是每次多等 ${v.permission_wait_secs} 秒。<br>` +
-    `默认只拦 <code>Bash</code>。填 <code>*</code> 会让每一次工具调用都等你点，通常不是你想要的。` +
-    `<br>另外：<code>permissions.defaultMode</code> 为 <code>bypassPermissions</code> 时 Claude Code 本来就不问权限，此功能不触发。`;
-
-  ui.claudeSettings.textContent = v.about.claude_settings;
   ui.version.textContent = `v${v.about.version}`;
   ui.port.textContent = `127.0.0.1:${v.about.port}`;
   ui.configDir.textContent = v.about.config_dir;
@@ -154,11 +163,11 @@ function wire() {
   ui.autostart.addEventListener("change", async () => {
     try {
       await invoke("set_autostart", { enabled: ui.autostart.checked });
-      toast(ui.autostart.checked ? "已开启开机自启" : "已关闭开机自启");
+      toast(ui.autostart.checked ? t("set.autostartOn") : t("set.autostartOff"));
     } catch (e) {
       // 写注册表可能失败，此时把勾选状态改回去，别让界面骗人
       ui.autostart.checked = !ui.autostart.checked;
-      toast(`设置失败: ${e}`, true);
+      toast(t("set.setFailed", { err: e }), true);
     }
   });
 
@@ -171,12 +180,26 @@ function wire() {
       return;
     }
     prefs.discover_window_minutes = n;
-    apply("时间窗").then(refreshAfterClamp);
+    apply("what.window").then(refreshAfterClamp);
   });
 
   ui.editor.addEventListener("change", () => {
     prefs.editor = ui.editor.value;
-    apply("编辑器");
+    apply("what.editor");
+  });
+
+  ui.lang.addEventListener("change", async () => {
+    prefs.lang = ui.lang.value;
+    await apply("what.lang");
+    // 整个窗口换语言：重新拉一次设置，因为动态文案里带插值
+    try {
+      const v = await invoke("get_settings");
+      window.I18N.setLang(v.lang_code);
+      window.I18N.applyI18n();
+      fill(v);
+    } catch (e) {
+      /* 保持现状 */
+    }
   });
 
   // 用 change 而不是 input：每敲一个字符就去抢注册全局热键毫无意义，
@@ -187,7 +210,7 @@ function wire() {
   ]) {
     input.addEventListener("change", () => {
       prefs[key] = input.value.trim();
-      apply("快捷键");
+      apply("what.shortcut");
     });
   }
 
@@ -195,14 +218,16 @@ function wire() {
     prefs.muted = !ui.soundOn.checked;
     ui.sound.disabled = prefs.muted;
     ui.preview.disabled = prefs.muted;
-    apply("提示音");
+    apply("what.sound");
     // 打开时试听一声，好知道听到的是什么
-    if (!prefs.muted) invoke("preview_sound", { alias: prefs.sound }).catch(() => {});
+    if (!prefs.muted) {
+      invoke("preview_sound", { alias: prefs.sound }).catch(() => {});
+    }
   });
 
   ui.sound.addEventListener("change", () => {
     prefs.sound = ui.sound.value;
-    apply("声音");
+    apply("what.soundPick");
     invoke("preview_sound", { alias: prefs.sound }).catch(() => {});
   });
 
@@ -241,19 +266,10 @@ async function setPermHook(install) {
     });
     toast(msg);
   } catch (e) {
-    toast(`失败: ${e}`, true);
+    toast(t("set.failed", { err: e }), true);
   }
   ui.permOn.disabled = false;
-  // 回读真实状态，别让界面显示一个没落地的勾
-  try {
-    const v = await invoke("get_settings");
-    const m = v.permission_matcher;
-    ui.permOn.checked = m !== null && m !== undefined;
-    ui.permMatcher.value = ui.permOn.checked ? m : "Bash";
-    ui.permMatcher.disabled = !ui.permOn.checked;
-  } catch (e) {
-    /* 保持现状 */
-  }
+  await refreshHooks();
 }
 
 async function setHooks(install) {
@@ -263,7 +279,7 @@ async function setHooks(install) {
     const msg = await invoke("set_hooks", { install });
     toast(msg);
   } catch (e) {
-    toast(`${install ? "安装" : "卸载"}失败: ${e}`, true);
+    toast(t(install ? "set.installFailed" : "set.uninstallFailed", { err: e }), true);
   }
   await refreshHooks();
 }
@@ -271,15 +287,19 @@ async function setHooks(install) {
 async function init() {
   const tauri = window.__TAURI__;
   if (!tauri) {
-    document.body.textContent = "__TAURI__ 未注入，设置窗口无法工作";
+    document.body.textContent = t("set.noTauri");
     return;
   }
   invoke = (tauri.core && tauri.core.invoke) || tauri.invoke;
 
   try {
-    fill(await invoke("get_settings"));
+    const v = await invoke("get_settings");
+    // 语言先定再填内容：动态文案带插值，顺序反了会先渲染出中文再闪成英文
+    window.I18N.setLang(v.lang_code);
+    window.I18N.applyI18n();
+    fill(v);
   } catch (e) {
-    document.body.textContent = `读取设置失败: ${e}`;
+    document.body.textContent = t("set.loadFailed", { err: e });
     return;
   }
   wire();

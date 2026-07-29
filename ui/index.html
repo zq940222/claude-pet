@@ -11,7 +11,7 @@
          带该属性时才启动拖动，所以宠物图标和折叠按钮不会误触拖动。 -->
     <div id="card" class="card collapsed" data-tauri-drag-region>
       <div class="header" data-tauri-drag-region>
-        <button id="toggle" class="chev" type="button" aria-label="展开或收起"></button>
+        <button id="toggle" class="chev" type="button" data-i18n-aria="pet.toggleAria"></button>
 
         <!-- 折叠态：紧凑的宠物点阵 -->
         <div id="strip" class="strip"></div>
@@ -53,23 +53,33 @@
         </div>
         <div class="info">
           <div class="line-1">
-            <span id="dHead">挂件已启动</span><span id="dProj" class="dproj"></span>
+            <span id="dHead" data-i18n="pet.booted"></span
+            ><span id="dProj" class="dproj"></span>
           </div>
-          <div id="dDetail" class="line-2">等 Claude Code 事件</div>
+          <div id="dDetail" class="line-2" data-i18n="pet.waitingEvents"></div>
         </div>
 
         <!-- 只在这个会话有挂起的权限请求时出现 -->
         <div id="actions" class="actions" hidden>
-          <button type="button" id="allow" class="act act-allow" title="允许这次工具调用">
-            允许
-          </button>
-          <button type="button" id="deny" class="act act-deny" title="拒绝这次工具调用">
-            拒绝
-          </button>
+          <button
+            type="button"
+            id="allow"
+            class="act act-allow"
+            data-i18n="pet.allow"
+            data-i18n-title="pet.allowTitle"
+          ></button>
+          <button
+            type="button"
+            id="deny"
+            class="act act-deny"
+            data-i18n="pet.deny"
+            data-i18n-title="pet.denyTitle"
+          ></button>
         </div>
       </div>
     </div>
 
+    <script src="i18n.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

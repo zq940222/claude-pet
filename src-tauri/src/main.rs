@@ -13,6 +13,7 @@
 mod discover;
 mod editor;
 mod hooks;
+mod i18n;
 mod persist;
 mod sound;
 
@@ -162,8 +163,14 @@ fn project_of(cwd: &str) -> String {
 }
 
 /// 「工具名: 关键参数」。权限请求和 working 状态都要显示这个。
-fn tool_summary(v: &Value) -> String {
-    let tool = v.get("tool_name").and_then(Value::as_str).unwrap_or("工具");
+///
+/// 工具名和参数本身是语言中立的（`Bash: npm test`），只有拿不到工具名时的
+/// 兜底词需要翻译。
+fn tool_summary(v: &Value, lang: i18n::Lang) -> String {
+    let tool = v
+        .get("tool_name")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| i18n::tool_fallback(lang));
     // Bash 看 command，Edit/Write 看 file_path，其它退回 description
     let extra = v
         .get("tool_input")
@@ -183,13 +190,13 @@ fn tool_summary(v: &Value) -> String {
 }
 
 /// 把 hook 事件翻译成 (状态, 详情)。返回 None 表示这个事件不改变状态。
-fn classify(v: &Value) -> Option<(String, String)> {
+fn classify(v: &Value, lang: i18n::Lang) -> Option<(String, String)> {
     let ev = v.get("hook_event_name").and_then(Value::as_str).unwrap_or("");
 
     match ev {
-        "UserPromptSubmit" => Some(("working".into(), "思考中".into())),
+        "UserPromptSubmit" => Some(("working".into(), i18n::thinking(lang).into())),
 
-        "PreToolUse" | "PostToolUse" => Some(("working".into(), tool_summary(v))),
+        "PreToolUse" | "PostToolUse" => Some(("working".into(), tool_summary(v, lang))),
 
         "Notification" => {
             let t = v
@@ -210,8 +217,8 @@ fn classify(v: &Value) -> Option<(String, String)> {
             }
         }
 
-        "Stop" => Some(("idle".into(), "等你下一句".into())),
-        "SessionStart" => Some(("idle".into(), "会话开始".into())),
+        "Stop" => Some(("idle".into(), i18n::awaiting_reply(lang).into())),
+        "SessionStart" => Some(("idle".into(), i18n::session_started(lang).into())),
 
         _ => None,
     }
@@ -222,7 +229,7 @@ fn classify(v: &Value) -> Option<(String, String)> {
 /// 判据是 `新状态是 waiting 且不等于旧状态`：
 /// - 同一等待态的重复事件不响 —— 否则一串事件会连成噪音
 /// - `waiting-permission` → `waiting-input` 会响，因为要你处理的事情换了
-fn handle_event(store: &Store, v: &Value) -> bool {
+fn handle_event(store: &Store, v: &Value, lang: i18n::Lang) -> bool {
     let sid = v
         .get("session_id")
         .and_then(Value::as_str)
@@ -237,7 +244,7 @@ fn handle_event(store: &Store, v: &Value) -> bool {
         return false;
     }
 
-    let Some((state, detail)) = classify(v) else {
+    let Some((state, detail)) = classify(v, lang) else {
         return false;
     };
     let cwd = v
@@ -370,6 +377,18 @@ fn get_view(store: tauri::State<Store>, pending: tauri::State<PendingState>) -> 
     build_view(&store, &pending)
 }
 
+/// 挂件启动时问一次语言。**不**塞进 `AppView` —— 那个每来一个 hook 事件就
+/// emit 一次，为一个几乎不变的值搭车没道理。改语言时另发 `pet://lang`。
+#[tauri::command]
+fn get_lang(prefs: tauri::State<PrefsState>) -> String {
+    prefs
+        .lock()
+        .map(|p| p.resolved_lang())
+        .unwrap_or(i18n::Lang::Zh)
+        .code()
+        .to_string()
+}
+
 /// 前端点了允许/拒绝。把决定送给那条挂住的 HTTP 请求线程。
 #[tauri::command]
 fn resolve_permission(
@@ -397,7 +416,11 @@ fn resolve_permission(
 ///
 /// 真实 hook 事件优先：已经在表里的会话不覆盖 —— 事件带着准确的状态和 detail，
 /// 而扫描只能确定「这个会话存在」。
-fn merge_discovered(store: &Store, found: Vec<discover::Discovered>) -> usize {
+fn merge_discovered(
+    store: &Store,
+    found: Vec<discover::Discovered>,
+    lang: i18n::Lang,
+) -> usize {
     let mut added = 0;
     let Ok(mut map) = store.lock() else { return 0 };
 
@@ -413,7 +436,7 @@ fn merge_discovered(store: &Store, found: Vec<discover::Discovered>) -> usize {
                 // 状态只能是 idle：转录能告诉我们会话存在，但告诉不了它此刻
                 // 是在干活还是在等你。真实事件几秒内就会把它纠正过来。
                 state: "idle".into(),
-                detail: "恢复的会话".into(),
+                detail: i18n::restored(lang).into(),
                 // 用 mtime 而不是 now，这样宠物顺序反映会话的实际活跃先后
                 first_seen: d.mtime_ms,
                 updated_ms: d.mtime_ms,
@@ -429,7 +452,13 @@ fn merge_discovered(store: &Store, found: Vec<discover::Discovered>) -> usize {
 ///
 /// 改了时间窗设置后会再调一次：对这个设置来说，「立即生效」只能是
 /// 用新窗口重扫一遍，光改数字对已经建好的会话表没有任何影响。
-fn spawn_discovery(app: AppHandle, store: Store, pending: PendingState, window: Duration) {
+fn spawn_discovery(
+    app: AppHandle,
+    store: Store,
+    pending: PendingState,
+    window: Duration,
+    lang: i18n::Lang,
+) {
     std::thread::spawn(move || {
         let home = app.path().home_dir().ok();
         let Some(dir) = discover::projects_dir(home) else {
@@ -444,7 +473,7 @@ fn spawn_discovery(app: AppHandle, store: Store, pending: PendingState, window: 
         let started = std::time::Instant::now();
         let found = discover::scan(&dir, window);
         let scanned = found.len();
-        let added = merge_discovered(&store, found);
+        let added = merge_discovered(&store, found, lang);
 
         eprintln!(
             "[claude-pet] discovery: {scanned} recent session(s), {added} restored, took {}ms",
@@ -516,6 +545,7 @@ fn handle_permission(
     pending: PendingState,
     req: tiny_http::Request,
     body: String,
+    lang: i18n::Lang,
 ) {
     // 解析不了就当没这回事：回空 200 = 不给决定，交还 Claude Code 自己判断
     let Ok(v) = serde_json::from_str::<Value>(&body) else {
@@ -533,9 +563,9 @@ fn handle_permission(
     let tool = v
         .get("tool_name")
         .and_then(Value::as_str)
-        .unwrap_or("工具")
+        .unwrap_or_else(|| i18n::tool_fallback(lang))
         .to_string();
-    let detail = tool_summary(&v);
+    let detail = tool_summary(&v, lang);
 
     // 让宠物变红。复用现有的 waiting-permission 状态，不另造一套视觉语言 ——
     // 用户已经认识「红色 + ! + 呼吸」就是要他动手。
@@ -633,16 +663,24 @@ fn spawn_server(app: AppHandle, store: Store, prefs: PrefsState, pending: Pendin
             //
             // 反过来，普通事件刻意留在主循环里顺序处理：这样同一会话的
             // 事件不会被线程调度打乱顺序（Stop 抢在它前面的 PreToolUse 之前）。
+            // 每条请求都重读语言：设置窗口随时可能改它，缓存一份就会过期
+            let lang = prefs
+                .lock()
+                .map(|p| p.resolved_lang())
+                .unwrap_or(i18n::Lang::Zh);
+
             if req.url().starts_with("/permission") {
                 let app = app.clone();
                 let store = store.clone();
                 let pending = pending.clone();
-                std::thread::spawn(move || handle_permission(app, store, pending, req, body));
+                std::thread::spawn(move || {
+                    handle_permission(app, store, pending, req, body, lang)
+                });
                 continue;
             }
 
             if let Ok(v) = serde_json::from_str::<Value>(&body) {
-                let notify = handle_event(&store, &v);
+                let notify = handle_event(&store, &v, lang);
                 let _ = app.emit("pet://view", build_view(&store, &pending));
 
                 if notify {
@@ -799,6 +837,9 @@ struct SettingsView {
     /// 权限拦截 hook 装了没；装了就是它的 matcher。None = 没装。
     permission_matcher: Option<String>,
     permission_wait_secs: u64,
+    /// 解析后的语言（`"auto"` 已经变成 `zh` / `en`）。
+    /// 前端不自己猜系统语言 —— 两边各猜一次必然会有不一致的时候。
+    lang_code: String,
     about: AboutInfo,
 }
 
@@ -806,6 +847,8 @@ struct SettingsView {
 fn get_settings(app: AppHandle, prefs: tauri::State<PrefsState>) -> SettingsView {
     let current = prefs.lock().map(|p| p.clone()).unwrap_or_default();
     let (hooks_installed, hooks_total) = hooks::status(&app).unwrap_or((0, 0));
+    // 先算出来，下面 prefs 字段会把 current move 掉
+    let lang_code = current.resolved_lang().code().to_string();
 
     SettingsView {
         prefs: current,
@@ -818,6 +861,7 @@ fn get_settings(app: AppHandle, prefs: tauri::State<PrefsState>) -> SettingsView
         hooks_total,
         permission_matcher: hooks::permission_status(&app),
         permission_wait_secs: PERMISSION_WAIT.as_secs(),
+        lang_code,
         about: AboutInfo {
             version: app.package_info().version.to_string(),
             config_dir: persist::config_path(&app, "")
@@ -845,16 +889,23 @@ fn apply_prefs(
     next.sanitise();
 
     // 在锁里算出「哪些变了」，出了锁再去做重扫/重注册这些慢动作
-    let (window_changed, shortcuts_changed) = {
+    let (window_changed, shortcuts_changed, lang_changed) = {
         let mut p = prefs_state.lock().map_err(|_| "prefs lock poisoned")?;
         let changed = (
             p.discover_window_minutes != next.discover_window_minutes,
             p.shortcut_toggle != next.shortcut_toggle || p.shortcut_next != next.shortcut_next,
+            p.resolved_lang() != next.resolved_lang(),
         );
         *p = next.clone();
         persist::save_prefs(&app, &p);
         changed
     };
+
+    // 挂件要重渲染成新语言。托盘菜单不跟着变（Tauri 菜单项文本不能原地改，
+    // 为此重建整个托盘不值得），所以设置界面里注明了要重启才生效。
+    if lang_changed {
+        let _ = app.emit("pet://lang", next.resolved_lang().code());
+    }
 
     // 托盘的勾选状态要跟着变，否则两处显示不一致
     if let Ok(items) = tray.lock() {
@@ -871,6 +922,7 @@ fn apply_prefs(
             (*store).clone(),
             (*pending).clone(),
             next.discover_window(),
+            next.resolved_lang(),
         );
     }
 
@@ -964,8 +1016,13 @@ fn open_settings(app: &AppHandle) {
         let _ = w.set_focus();
         return;
     }
+    let lang = app
+        .state::<PrefsState>()
+        .lock()
+        .map(|p| p.resolved_lang())
+        .unwrap_or(i18n::Lang::Zh);
     match WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("settings.html".into()))
-        .title("Claude Pet 设置")
+        .title(i18n::window_settings(lang))
         .inner_size(540.0, 620.0)
         .min_inner_size(460.0, 480.0)
         .resizable(true)
@@ -1007,18 +1064,38 @@ fn build_tray(app: &tauri::App, prefs: PrefsState, tray_state: TrayState) -> tau
         false,
         None::<&str>,
     )?;
-    let autostart_item =
-        CheckMenuItem::with_id(app, "autostart", "开机自启", true, autostart_on, None::<&str>)?;
+    // 托盘菜单在建的时候定语言。改语言后要重启挂件才会跟着变 ——
+    // Tauri 的菜单项文本不能原地改，重建整个托盘的代价和收益不成比例。
+    let lang = prefs
+        .lock()
+        .map(|p| p.resolved_lang())
+        .unwrap_or(i18n::Lang::Zh);
+
+    let autostart_item = CheckMenuItem::with_id(
+        app,
+        "autostart",
+        i18n::tray_autostart(lang),
+        true,
+        autostart_on,
+        None::<&str>,
+    )?;
 
     // 正向表述：勾上 = 会响。比「静音」勾上=不响少一层反向理解。
     let sound_on = !prefs.lock().map(|p| p.muted).unwrap_or(false);
-    let sound_item =
-        CheckMenuItem::with_id(app, "sound", "提示音", true, sound_on, None::<&str>)?;
+    let sound_item = CheckMenuItem::with_id(
+        app,
+        "sound",
+        i18n::tray_sound(lang),
+        true,
+        sound_on,
+        None::<&str>,
+    )?;
 
     let sep = PredefinedMenuItem::separator(app)?;
     let sep2 = PredefinedMenuItem::separator(app)?;
-    let settings_item = MenuItem::with_id(app, "settings", "设置…", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "退出 Claude Pet", true, None::<&str>)?;
+    let settings_item =
+        MenuItem::with_id(app, "settings", i18n::tray_settings(lang), true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", i18n::tray_quit(lang), true, None::<&str>)?;
 
     let menu = Menu::with_items(
         app,
@@ -1334,6 +1411,7 @@ fn main() {
         .manage(pending.clone())
         .invoke_handler(tauri::generate_handler![
             get_view,
+            get_lang,
             resize_pet,
             get_settings,
             apply_prefs,
@@ -1361,12 +1439,17 @@ fn main() {
 
             // 偏好要在建托盘之前读 —— 托盘的「提示音」勾选状态来自它
             let mut window = persist::Prefs::default().discover_window();
+            let mut startup_lang = i18n::Lang::Zh;
             if let Ok(mut p) = prefs.lock() {
                 *p = persist::load_prefs(&handle);
                 window = p.discover_window();
+                startup_lang = p.resolved_lang();
                 eprintln!(
-                    "[claude-pet] prefs: muted={} sound={} window={}min",
-                    p.muted, p.sound, p.discover_window_minutes
+                    "[claude-pet] prefs: lang={} muted={} sound={} window={}min",
+                    startup_lang.code(),
+                    p.muted,
+                    p.sound,
+                    p.discover_window_minutes
                 );
             }
 
@@ -1406,6 +1489,13 @@ fn main() {
                 restore_position(&win, &handle);
                 let _ = win.show();
                 let _ = win.set_always_on_top(true);
+
+                // 挂件没有可见的控制台，前端一出问题只能靠 devtools 定位。
+                // 只在 debug 构建里开，release 不会带。
+                #[cfg(debug_assertions)]
+                if std::env::args().any(|a| a == "--devtools") {
+                    win.open_devtools();
+                }
 
                 // 拖动时只记内存，不碰磁盘。存右下角，和 resize_pet 的锚定一致。
                 let anchor_for_move = anchor.clone();
@@ -1465,7 +1555,7 @@ fn main() {
             }
 
             spawn_server(handle.clone(), store.clone(), prefs.clone(), pending.clone());
-            spawn_discovery(handle, store.clone(), pending.clone(), window);
+            spawn_discovery(handle, store.clone(), pending.clone(), window, startup_lang);
             Ok(())
         })
         .run(tauri::generate_context!())

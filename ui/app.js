@@ -4,15 +4,33 @@
 // Rust 侧吐完整的会话树（已按 first_seen 排好序，保证图标不乱跳），
 // 这里只负责渲染、选中、折叠展开。
 
-const STATE_TEXT = {
-  working: "干活中",
-  "waiting-permission": "要你点允许",
-  "waiting-input": "在等你回话",
-  idle: "空闲",
-  done: "完成了",
-};
+const KNOWN_STATES = [
+  "working",
+  "waiting-permission",
+  "waiting-input",
+  "idle",
+  "done",
+];
 
-const KNOWN_STATES = Object.keys(STATE_TEXT);
+const t = (k, v) => window.I18N.t(k, v);
+const stateText = (s) => t(`state.${s}`);
+
+// 挂件没有可见的控制台，脚本一出错就是整块空白，看不出所以然。
+// 把错误写进详情行，这样至少「哪里炸了」是可见的。
+function showFatal(prefix, msg) {
+  // 必须写进 strip：折叠态下 .detail 是 display:none，写那儿等于看不见，
+  // 而脚本挂掉时卡片正是停在折叠态的。
+  const strip = document.getElementById("strip");
+  if (strip) {
+    strip.textContent = `${prefix}: ${msg}`;
+    strip.style.color = "#ff8a82";
+    strip.style.fontSize = "10px";
+  }
+}
+window.addEventListener("error", (e) => showFatal("JS", e.message));
+window.addEventListener("unhandledrejection", (e) =>
+  showFatal("Promise", e.reason && e.reason.message ? e.reason.message : e.reason)
+);
 const PAD = 10; // 与 body 的 padding 一致，留给自绘阴影
 
 const el = {
@@ -100,7 +118,7 @@ function focusNextWaiting() {
     app.expanded = true;
     app.pinned = true;
     render();
-    flash("没有会话在等你");
+    flash(t("pet.nothingWaiting"));
     return;
   }
   const at = waiting.findIndex((s) => s.id === app.selected);
@@ -122,10 +140,10 @@ function makePet(session, project, big) {
   if (big && session.id === app.selected) node.classList.add("selected");
 
   node.title =
-    `${project} #${session.index} — ${STATE_TEXT[state]}` +
+    `${project} #${session.index} — ${stateText(state)}` +
     (session.detail ? `\n${session.detail}` : "") +
     (session.cwd ? `\n${session.cwd}` : "") +
-    (big ? "\n\n双击在编辑器中打开" : "");
+    (big ? `\n\n${t("pet.dblclickHint")}` : "");
 
   if (big) {
     node.type = "button";
@@ -142,7 +160,7 @@ function makePet(session, project, big) {
       if (!app.invoke) return;
       try {
         const used = await app.invoke("open_in_editor", { sessionId: session.id });
-        flash(`已在 ${used} 中打开`);
+        flash(t("pet.openedIn", { editor: used }));
       } catch (err) {
         flash(String(err), true);
       }
@@ -170,7 +188,7 @@ function renderStrip(view) {
   if (view.total === 0) {
     const s = document.createElement("span");
     s.className = "strip-empty";
-    s.textContent = "没有活动会话";
+    s.textContent = t("pet.noSessions");
     el.strip.appendChild(s);
     return;
   }
@@ -199,11 +217,14 @@ function renderStrip(view) {
 
 function renderSummary(view) {
   if (view.total === 0) {
-    el.summary.textContent = "没有活动会话";
+    el.summary.textContent = t("pet.noSessions");
   } else if (view.waiting > 0) {
-    el.summary.textContent = `${view.total} 个会话 · ${view.waiting} 个在等你`;
+    el.summary.textContent = t("pet.sessionsWaiting", {
+      n: view.total,
+      w: view.waiting,
+    });
   } else {
-    el.summary.textContent = `${view.total} 个会话`;
+    el.summary.textContent = t("pet.sessions", { n: view.total });
   }
 }
 
@@ -271,15 +292,15 @@ function renderDetail(view) {
 
   if (!current) {
     el.detail.classList.add("state-idle");
-    el.dHead.textContent = "空闲";
+    el.dHead.textContent = stateText("idle");
     el.dProj.textContent = "";
-    el.dDetail.textContent = "没有活动会话";
+    el.dDetail.textContent = t("pet.noSessions");
     return;
   }
 
   const state = safeState(current.state);
   el.detail.classList.add(`state-${state}`);
-  el.dHead.textContent = STATE_TEXT[state];
+  el.dHead.textContent = stateText(state);
   el.dProj.textContent = `${current.project} #${current.index}`;
   el.dDetail.textContent = current.detail || "";
 }
@@ -342,12 +363,21 @@ function onView(view) {
 async function init() {
   const tauri = window.__TAURI__;
   if (!tauri) {
-    el.dDetail.textContent = "__TAURI__ 未注入";
+    el.dDetail.textContent = t("pet.noTauri");
     return;
   }
 
   // Tauri 2 把 invoke 挪到了 core 下，这里兼容一下老位置
   app.invoke = (tauri.core && tauri.core.invoke) || tauri.invoke;
+
+  // 语言要在第一次 render 之前定。Rust 侧已经把 "auto" 解析成了具体语言，
+  // 前端不自己猜系统语言 —— 两边各猜一次必然会有不一致的时候。
+  try {
+    window.I18N.setLang(await app.invoke("get_lang"));
+  } catch (err) {
+    /* 拿不到就用默认，不该因此白屏 */
+  }
+  window.I18N.applyI18n();
 
   el.toggle.addEventListener("click", (e) => {
     e.stopPropagation();
@@ -381,8 +411,14 @@ async function init() {
       if (e.payload === "toggle") toggleExpanded();
       else if (e.payload === "next") focusNextWaiting();
     });
+    // 设置窗口改了语言就地重渲染，不用重启挂件
+    await tauri.event.listen("pet://lang", (e) => {
+      window.I18N.setLang(e.payload);
+      window.I18N.applyI18n();
+      render();
+    });
   } catch (err) {
-    el.dDetail.textContent = `订阅失败: ${err}`;
+    el.dDetail.textContent = t("pet.subscribeFailed", { err });
     return;
   }
 
@@ -390,7 +426,7 @@ async function init() {
   try {
     onView(await app.invoke("get_view"));
   } catch (err) {
-    el.dDetail.textContent = `读取状态失败: ${err}`;
+    el.dDetail.textContent = t("pet.readFailed", { err });
     render();
   }
 }
