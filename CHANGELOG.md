@@ -10,6 +10,14 @@
 
 ### Added
 
+- **全局快捷键**（#8）—— 默认 `Ctrl+Alt+P` 展开/收起、`Ctrl+Alt+N` 跳到下一个在等你的会话，设置窗口可改。
+  - 只在**等待中**的会话里循环：快捷键的用途就是「谁在等我」，串上干活中和空闲的只会让人多按几次
+  - `on_shortcut` 的回调按下和松开都会触发，**只处理按下** —— 否则每次触发两遍
+  - 注册失败只当警告返回，不阻止其它设置保存；实测一个键被占用（`HotKey already registered`）或写法非法时，**另一个键仍然注册成功**
+  - 留空 = 不注册（明确的「我不要这个键」，不是错误）
+  - Rust 侧只 emit 动作名，折叠/选中状态仍只住在前端状态机里 —— 两边各存一份必然不一致
+  - release exe 3.37 → 3.57 MB
+
 - **双击宠物跳回编辑器**（#7）—— 用会话的 cwd 打开 Cursor / VS Code / Windsurf / JetBrains 各款；设置窗口可指定，只列本机装了的。
   - `Session` 增加 `cwd` 字段（`project` 只是末段，拿不回原路径），缓存版本 1 → 2
   - 自己实现 `which`（`PATH` + `PATHEXT`）：`code`/`cursor` 是 `.cmd` shim，Rust 的 `Command` 直接调 `CreateProcessW` 执行不了，需按扩展名决定是否经 `cmd`

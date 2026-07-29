@@ -134,10 +134,24 @@ pub struct Prefs {
     /// VS Code，静默换成 Cursor 是在骗人。
     #[serde(default = "default_editor")]
     pub editor: String,
+    /// 展开/收起挂件的全局快捷键。空串 = 不注册。
+    #[serde(default = "default_shortcut_toggle")]
+    pub shortcut_toggle: String,
+    /// 跳到下一个在等你的会话。空串 = 不注册。
+    #[serde(default = "default_shortcut_next")]
+    pub shortcut_next: String,
 }
 
 fn default_editor() -> String {
     "auto".to_string()
+}
+
+fn default_shortcut_toggle() -> String {
+    "Ctrl+Alt+P".to_string()
+}
+
+fn default_shortcut_next() -> String {
+    "Ctrl+Alt+N".to_string()
 }
 
 fn default_sound() -> String {
@@ -160,6 +174,8 @@ impl Default for Prefs {
             sound: default_sound(),
             discover_window_minutes: default_window_minutes(),
             editor: default_editor(),
+            shortcut_toggle: default_shortcut_toggle(),
+            shortcut_next: default_shortcut_next(),
         }
     }
 }

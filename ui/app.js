@@ -85,6 +85,29 @@ function toggleExpanded() {
   render();
 }
 
+/// 全局快捷键：跳到下一个在等你的会话。
+///
+/// 在「等待中的会话」里循环，而不是在全部会话里 —— 快捷键的用途就是
+/// 「谁在等我」，把干活中和空闲的也串进去只会让人多按好几次。
+function focusNextWaiting() {
+  const waiting = allSessions(app.view).filter((s) =>
+    s.state.startsWith("waiting")
+  );
+  if (!waiting.length) {
+    app.expanded = true;
+    app.pinned = true;
+    render();
+    flash("没有会话在等你");
+    return;
+  }
+  const at = waiting.findIndex((s) => s.id === app.selected);
+  app.selected = waiting[(at + 1) % waiting.length].id;
+  app.expanded = true;
+  // 是用户主动唤出来的，别下一个事件就给收起去
+  app.pinned = true;
+  render();
+}
+
 // ── 渲染 ─────────────────────────────────────────────────────
 
 function makePet(session, project, big) {
@@ -321,6 +344,11 @@ async function init() {
 
   try {
     await tauri.event.listen("pet://view", (e) => onView(e.payload));
+    // 全局快捷键只送动作名过来；折叠和选中状态都住在这边的状态机里
+    await tauri.event.listen("pet://shortcut", (e) => {
+      if (e.payload === "toggle") toggleExpanded();
+      else if (e.payload === "next") focusNextWaiting();
+    });
   } catch (err) {
     el.dDetail.textContent = `订阅失败: ${err}`;
     return;

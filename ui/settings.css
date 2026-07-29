@@ -134,6 +134,17 @@ input[type="number"] {
   font-variant-numeric: tabular-nums;
 }
 
+input.accel {
+  background: #14161b;
+  color: #dfe4ec;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 12.5px;
+  width: 152px;
+}
+
 select {
   min-width: 168px;
   cursor: pointer;

@@ -28,6 +28,7 @@ use tauri::{
     AppHandle, Emitter, LogicalSize, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
 };
 use tauri_plugin_autostart::{ManagerExt as AutostartExt, MacosLauncher};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 /// 挂件监听端口。改这里的话记得同步改 ~/.claude/settings.json 里的 hook url。
 const PORT: u16 = 47800;
@@ -501,6 +502,43 @@ fn restore_position(win: &WebviewWindow, app: &AppHandle) {
     position_bottom_right(win);
 }
 
+// ── 全局快捷键 ───────────────────────────────────────────────
+
+/// 按偏好注册全局快捷键，返回给用户看的警告（注册失败不该让别的设置也保存不了）。
+///
+/// 快捷键只负责 emit 一个动作名给前端 —— 折叠状态和选中状态都住在前端的
+/// 状态机里，在 Rust 侧另存一份必然会不一致。
+fn register_shortcuts(app: &AppHandle, prefs: &persist::Prefs) -> Vec<String> {
+    let gs = app.global_shortcut();
+    // 先全撤。改绑定时不撤的话旧的还留着，会出现两个键都能用的鬼现象。
+    let _ = gs.unregister_all();
+
+    let mut warnings = Vec::new();
+    for (accel, action) in [
+        (prefs.shortcut_toggle.trim(), "toggle"),
+        (prefs.shortcut_next.trim(), "next"),
+    ] {
+        // 空串是明确的「我不要这个快捷键」，不是错误
+        if accel.is_empty() {
+            continue;
+        }
+        let owned = action.to_string();
+        let result = gs.on_shortcut(accel, move |app, _shortcut, event| {
+            // 按下和松开都会回调，只处理按下 —— 否则每次触发两遍
+            if event.state() == ShortcutState::Pressed {
+                let _ = app.emit("pet://shortcut", owned.clone());
+            }
+        });
+        match result {
+            Ok(()) => eprintln!("[claude-pet] 快捷键 {accel} → {action}"),
+            Err(e) => warnings.push(format!(
+                "快捷键「{accel}」注册失败，可能已被别的程序占用：{e}"
+            )),
+        }
+    }
+    warnings
+}
+
 // ── 设置窗口 ─────────────────────────────────────────────────
 
 /// 托盘勾选项的句柄。
@@ -574,18 +612,22 @@ fn apply_prefs(
     tray: tauri::State<TrayState>,
     store: tauri::State<Store>,
     incoming: persist::Prefs,
-) -> Result<(), String> {
+) -> Result<Vec<String>, String> {
     let mut next = incoming;
     // 前端传来的值不能信 —— 手改 prefs.json 和前端 bug 都可能给出越界值
     next.sanitise();
 
-    let mut window_changed = false;
-    {
+    // 在锁里算出「哪些变了」，出了锁再去做重扫/重注册这些慢动作
+    let (window_changed, shortcuts_changed) = {
         let mut p = prefs_state.lock().map_err(|_| "prefs lock poisoned")?;
-        window_changed = window_changed || p.discover_window_minutes != next.discover_window_minutes;
+        let changed = (
+            p.discover_window_minutes != next.discover_window_minutes,
+            p.shortcut_toggle != next.shortcut_toggle || p.shortcut_next != next.shortcut_next,
+        );
         *p = next.clone();
         persist::save_prefs(&app, &p);
-    }
+        changed
+    };
 
     // 托盘的勾选状态要跟着变，否则两处显示不一致
     if let Ok(items) = tray.lock() {
@@ -599,7 +641,14 @@ fn apply_prefs(
         spawn_discovery(app.clone(), (*store).clone(), next.discover_window());
     }
 
-    Ok(())
+    // 快捷键注册失败只当警告返回：别因为一个键被占用就让其它设置也存不下去
+    let warnings = if shortcuts_changed {
+        register_shortcuts(&app, &next)
+    } else {
+        Vec::new()
+    };
+
+    Ok(warnings)
 }
 
 #[tauri::command]
@@ -1006,6 +1055,8 @@ fn main() {
             MacosLauncher::LaunchAgent,
             None,
         ))
+        // 不给全局 handler：每个快捷键在 register_shortcuts 里挂自己的闭包
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(store.clone())
         .manage(prefs.clone())
         .manage(tray_state.clone())
@@ -1047,6 +1098,12 @@ fn main() {
 
             // 窗口没有标题栏也不在任务栏，托盘是唯一的退出入口 —— 不能省。
             build_tray(app, prefs.clone(), tray_state.clone())?;
+
+            if let Ok(p) = prefs.lock() {
+                for w in register_shortcuts(&handle, &p) {
+                    eprintln!("[claude-pet] {w}");
+                }
+            }
 
             // 缓存必须在 spawn_discovery 之前加载。
             //

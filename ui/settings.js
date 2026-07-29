@@ -11,6 +11,8 @@ const ui = {
   windowHint: el("windowHint"),
   editor: el("editor"),
   editorHint: el("editorHint"),
+  scToggle: el("scToggle"),
+  scNext: el("scNext"),
   soundOn: el("soundOn"),
   sound: el("sound"),
   preview: el("preview"),
@@ -41,10 +43,17 @@ function toast(msg, isError) {
 }
 
 /// 把当前 prefs 整体推给 Rust。Rust 侧会 sanitise，所以越界值不会落盘。
+///
+/// 返回的是警告列表而不是错误：一个快捷键被占用不该让别的设置也存不下去，
+/// 所以那种情况走 warning，而 toast 要把它显示成红色 —— 否则用户会以为设好了。
 async function apply(what) {
   try {
-    await invoke("apply_prefs", { incoming: prefs });
-    toast(what ? `${what}已保存` : "已保存");
+    const warnings = await invoke("apply_prefs", { incoming: prefs });
+    if (Array.isArray(warnings) && warnings.length) {
+      toast(warnings.join("；"), true);
+    } else {
+      toast(what ? `${what}已保存` : "已保存");
+    }
   } catch (e) {
     toast(`保存失败: ${e}`, true);
   }
@@ -102,6 +111,9 @@ function fill(v) {
     ? `双击宠物在对应项目里打开。已找到：${v.editors.map((e) => e.label).join("、")}。`
     : "PATH 上没找到 Cursor / VS Code / JetBrains 的命令行工具，双击不会有反应。";
 
+  ui.scToggle.value = prefs.shortcut_toggle;
+  ui.scNext.value = prefs.shortcut_next;
+
   ui.soundOn.checked = !prefs.muted;
   ui.sound.textContent = "";
   for (const s of v.sounds) {
@@ -151,6 +163,18 @@ function wire() {
     prefs.editor = ui.editor.value;
     apply("编辑器");
   });
+
+  // 用 change 而不是 input：每敲一个字符就去抢注册全局热键毫无意义，
+  // 而且中间态（"Ctrl+"）必然注册失败，会刷出一串假警告。
+  for (const [input, key] of [
+    [ui.scToggle, "shortcut_toggle"],
+    [ui.scNext, "shortcut_next"],
+  ]) {
+    input.addEventListener("change", () => {
+      prefs[key] = input.value.trim();
+      apply("快捷键");
+    });
+  }
 
   ui.soundOn.addEventListener("change", () => {
     prefs.muted = !ui.soundOn.checked;
