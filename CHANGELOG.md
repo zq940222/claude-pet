@@ -10,6 +10,14 @@
 
 ### Added
 
+- **hook 一键安装 / 卸载**（#3）—— 新增 `--install-hooks` / `--uninstall-hooks` / `--hooks-status`，消掉了上手路径上唯一需要手工编辑 JSON 的一步。`install.ps1` 加了 `-WireHooks` 开关，`-Uninstall` 现在也会顺带摘掉 hook。
+  - **合并而不是覆盖**：serde_json 开 `preserve_order` + 2 空格 pretty 打印，实测对真实 settings.json（4542 字节、含 `statusLine` 和 24 个 plugin）是逐字节一致的往返；不开这个 feature 的话默认 Map 会按字母序重排用户所有的键
+  - **幂等**：判重看 hook url；且「没变就不写」，所以重装不会刷出多余备份
+  - **只卸自己的**：只摘指向 `127.0.0.1:47800` 的 http hook。`Notification` 下并存的 toast（`command` 类型、matcher 更窄）不受影响
+  - 改动前备份成 `settings.json.bak-<epoch 毫秒>`，写入走临时文件 + rename
+  - 配置文件不存在（全新机器）时会创建；卸载会连 `hooks` 键一起移除，是安装的真正逆操作
+  - 尊重 `CLAUDE_CONFIG_DIR`
+
 - **会话状态跨启动持久化**（#2）—— 会话表落盘到 `%APPDATA%\com.opsmateai.claude-pet\sessions.json`，重启后状态和 detail 完整保留。自动发现（#1）只能还原「有哪些会话」，状态一律是 idle；两者合起来才是完整的「重启后接着用」。
   - 复用现有那个 5 秒线程落盘，「变了才写」（比较序列化后的字符串），最多丢 5 秒内的状态变化
   - 写入走临时文件 + rename：直接覆写的话，进程正好写一半时被杀会留下截断的 JSON

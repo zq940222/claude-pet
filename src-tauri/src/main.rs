@@ -11,6 +11,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod discover;
+mod hooks;
 mod persist;
 
 use serde::{Deserialize, Serialize};
@@ -513,6 +514,74 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
 
 // ── 无头 CLI ─────────────────────────────────────────────────
 
+/// 处理 `--install-hooks` / `--uninstall-hooks` / `--hooks-status`。
+/// 约定与 autostart 那组一致：用退出码传结果。
+fn handle_hooks_cli(app: &tauri::App) -> Option<i32> {
+    let args: Vec<String> = std::env::args().collect();
+    let flag = args.iter().find(|a| {
+        matches!(
+            a.as_str(),
+            "--install-hooks" | "--uninstall-hooks" | "--hooks-status"
+        )
+    })?;
+
+    let handle = app.handle();
+
+    let code = match flag.as_str() {
+        "--install-hooks" => match hooks::install(handle) {
+            Ok(r) => {
+                if r.changed {
+                    eprintln!("[claude-pet] installed {} hook event(s)", r.touched);
+                    if let Some(b) = r.backup {
+                        eprintln!("[claude-pet] backup: {}", b.display());
+                    }
+                } else {
+                    eprintln!("[claude-pet] hooks already installed, nothing to do");
+                }
+                0
+            }
+            Err(e) => {
+                eprintln!("[claude-pet] install-hooks failed: {e}");
+                1
+            }
+        },
+        "--uninstall-hooks" => match hooks::uninstall(handle) {
+            Ok(r) => {
+                if r.changed {
+                    eprintln!("[claude-pet] removed {} hook(s)", r.touched);
+                    if let Some(b) = r.backup {
+                        eprintln!("[claude-pet] backup: {}", b.display());
+                    }
+                } else {
+                    eprintln!("[claude-pet] no hooks of ours were present");
+                }
+                0
+            }
+            Err(e) => {
+                eprintln!("[claude-pet] uninstall-hooks failed: {e}");
+                1
+            }
+        },
+        // status: 0 = 全装好，2 = 没装或只装了一部分，1 = 读不了配置
+        _ => match hooks::status(handle) {
+            Ok((installed, total)) => {
+                eprintln!("[claude-pet] hooks installed: {installed}/{total}");
+                if installed == total {
+                    0
+                } else {
+                    2
+                }
+            }
+            Err(e) => {
+                eprintln!("[claude-pet] hooks-status failed: {e}");
+                1
+            }
+        },
+    };
+
+    Some(code)
+}
+
 /// 处理 `--enable-autostart` / `--disable-autostart` / `--autostart-status`。
 /// 返回 Some(exit_code) 表示这是一次 CLI 调用，调用方应当立刻退出；
 /// None 表示正常启动挂件。
@@ -586,9 +655,12 @@ fn main() {
         .manage(store.clone())
         .invoke_handler(tauri::generate_handler![get_view, resize_pet])
         .setup(move |app| {
-            // 无头开关自启：安装脚本要用。必须从「安装后的」exe 调用 ——
-            // 插件注册的是当前 exe 的路径。
+            // 无头 CLI：安装脚本要用，也方便手工排查。
+            // 自启那组必须从「安装后的」exe 调用 —— 插件注册的是当前 exe 的路径。
             if let Some(code) = handle_autostart_cli(app) {
+                std::process::exit(code);
+            }
+            if let Some(code) = handle_hooks_cli(app) {
                 std::process::exit(code);
             }
 

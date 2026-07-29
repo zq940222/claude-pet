@@ -13,7 +13,10 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# preserve_order 是改用户 settings.json 的前提：默认的 Map 按字母序排键，
+# 往返一次会把用户的配置整个重排。开了它 + 2 空格 pretty 打印后，
+# 实测对真实 settings.json 是逐字节一致的往返。
+serde_json = { version = "1", features = ["preserve_order"] }
 tiny_http = "0.12"
 tauri-plugin-autostart = "2"
 

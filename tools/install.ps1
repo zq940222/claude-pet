@@ -8,9 +8,10 @@
 #
 # Parameters:
 #   -Autostart      enable start-with-Windows after installing
+#   -WireHooks      write the Claude Code hook config for you (backs up first)
 #   -Version x.y.z  install a specific version (default: latest)
 #   -NoLaunch       do not start the widget after installing
-#   -Uninstall      stop it, disable autostart, remove files and shortcut
+#   -Uninstall      stop it, disable autostart, remove hooks, files and shortcut
 #
 # NOTE TO MAINTAINERS: this file must stay pure ASCII with NO byte-order mark.
 # It is fetched over HTTP and handed to iex / [scriptblock]::Create, and a
@@ -22,6 +23,7 @@
 [CmdletBinding()]
 param(
     [switch]$Autostart,
+    [switch]$WireHooks,
     [string]$Version,
     [switch]$NoLaunch,
     [switch]$Uninstall
@@ -71,12 +73,21 @@ if ($Uninstall) {
     if (Test-Path $ExePath) {
         Step 'disabling autostart'
         $null = Invoke-PetExe '--disable-autostart'
+        # Only our own http hooks are touched; anything else in settings.json,
+        # including other tools' hooks, is left alone. settings.json is backed
+        # up first. Leaving them would be harmless (an unreachable hook is a
+        # non-blocking error) but it is untidy.
+        Step 'removing hooks from settings.json'
+        if ((Invoke-PetExe '--uninstall-hooks') -eq 0) {
+            Ok 'hooks removed'
+        } else {
+            Warn 'could not remove hooks -- edit ~/.claude/settings.json yourself'
+        }
     }
     Stop-Pet
     if (Test-Path $StartMenu)  { Remove-Item $StartMenu -Force;           Ok 'removed Start Menu shortcut' }
     if (Test-Path $InstallDir) { Remove-Item $InstallDir -Recurse -Force; Ok "removed $InstallDir" }
     Warn "config kept at $env:APPDATA\com.opsmateai.claude-pet (delete it yourself if you want)"
-    Warn 'hooks kept in ~/.claude/settings.json (remove the 127.0.0.1:47800 entries yourself)'
     Ok 'uninstalled'
     return
 }
@@ -148,6 +159,21 @@ if ($Autostart) {
     Warn 'autostart not enabled (pass -Autostart, or use the tray menu)'
 }
 
+# -- Hooks ----------------------------------------------------
+
+$hooksWired = $false
+if ($WireHooks) {
+    Step 'writing hook config into settings.json'
+    # Merges into the existing file and backs it up first; only entries pointing
+    # at this widget's port are added, and re-running is a no-op.
+    if ((Invoke-PetExe '--install-hooks') -eq 0) {
+        Ok 'hooks installed'
+        $hooksWired = $true
+    } else {
+        Warn 'could not write hooks -- falling back to the manual snippet below'
+    }
+}
+
 # -- Launch ---------------------------------------------------
 
 if (-not $NoLaunch) {
@@ -163,8 +189,22 @@ if (-not $NoLaunch) {
 # -- Tell them about the hooks --------------------------------
 
 Write-Host ''
+if ($hooksWired) {
+    Write-Host 'Hooks are wired up. Open a NEW Claude Code session to see the widget light up' -ForegroundColor Yellow
+    Write-Host '(hooks are read when a session starts).' -ForegroundColor Yellow
+    Write-Host ''
+    Write-Host 'Uninstall:' -ForegroundColor Yellow
+    Write-Host '  & ([scriptblock]::Create((irm https://raw.githubusercontent.com/zq940222/claude-pet/main/tools/install.ps1))) -Uninstall'
+    return
+}
+
 Write-Host 'One more step: the widget only lights up once Claude Code posts events to it.' -ForegroundColor Yellow
-Write-Host 'Add this to the "hooks" object in ~/.claude/settings.json:' -ForegroundColor Yellow
+Write-Host 'Either re-run this installer with -WireHooks, or run:' -ForegroundColor Yellow
+Write-Host ''
+Write-Host "  & '$ExePath' --install-hooks"
+Write-Host ''
+Write-Host 'Both merge into settings.json and back it up first. To do it by hand instead,' -ForegroundColor Yellow
+Write-Host 'add this to the "hooks" object in ~/.claude/settings.json:' -ForegroundColor Yellow
 Write-Host ''
 @'
   "UserPromptSubmit": [ { "hooks": [ { "type": "http", "url": "http://127.0.0.1:47800/", "async": true, "timeout": 5 } ] } ],

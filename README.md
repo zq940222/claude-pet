@@ -10,15 +10,21 @@
 irm https://raw.githubusercontent.com/zq940222/claude-pet/main/tools/install.ps1 | iex
 ```
 
-想同时开启开机自启（`irm | iex` 没法传参，得用 scriptblock 形式）：
+推荐带参数装 —— 一次把自启和 hook 都配好（`irm | iex` 没法传参，得用 scriptblock 形式）：
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/zq940222/claude-pet/main/tools/install.ps1))) -Autostart
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/zq940222/claude-pet/main/tools/install.ps1))) -Autostart -WireHooks
 ```
 
-装到 `%LOCALAPPDATA%\ClaudePet\`，建开始菜单快捷方式，然后启动。其它参数：`-Version x.y.z` 装指定版本、`-NoLaunch` 装完不启动、`-Uninstall` 卸载。
+装到 `%LOCALAPPDATA%\ClaudePet\`，建开始菜单快捷方式，然后启动。其它参数：`-Version x.y.z` 装指定版本、`-NoLaunch` 装完不启动、`-Uninstall` 卸载（会同时关自启、摘掉 hook）。
 
-**装完还有一步**：挂件只有在 Claude Code 把事件 POST 给它之后才会亮。安装脚本结束时会打印要加进 `~/.claude/settings.json` 的 hook 配置。hook 在 session 启动时加载，所以要**开一个新的 Claude Code 会话**才生效。
+**没带 `-WireHooks` 的话还有一步**：挂件只有在 Claude Code 把事件 POST 给它之后才会亮，需要在 `~/.claude/settings.json` 里配 hook。可以随时补上：
+
+```bash
+claude-pet.exe --install-hooks
+```
+
+hook 在 session 启动时加载，所以配完要**开一个新的 Claude Code 会话**才生效。
 
 需要 [WebView2 运行时](https://developer.microsoft.com/microsoft-edge/webview2/)（Win11 和更新过的 Win10 自带）。
 
@@ -122,7 +128,23 @@ cd src-tauri && cargo build --release
 claude-pet.exe --enable-autostart     # 退出码 0 = 成功
 claude-pet.exe --disable-autostart
 claude-pet.exe --autostart-status     # 0 = 已开启, 2 = 已关闭, 1 = 读不到
+
+claude-pet.exe --install-hooks        # 写 hook 配置进 settings.json
+claude-pet.exe --uninstall-hooks      # 只摘掉指向本挂件的
+claude-pet.exe --hooks-status         # 0 = 全装好, 2 = 未装或只装了一部分, 1 = 读不了配置
 ```
+
+### 改 settings.json 的三条硬约束
+
+`--install-hooks` 改的是用户正在用的配置文件，所以：
+
+**合并而不是覆盖。** `statusLine`、`enabledPlugins`、别人装的 hook 都不能动。往返用 serde_json 的 `preserve_order` + 2 空格 pretty 打印 —— 实测对真实 settings.json（4542 字节、含 statusLine 和 24 个 plugin）是**逐字节一致**的往返。少了 `preserve_order` 的话默认 Map 会按字母序重排所有键。
+
+**幂等。** 判重看 hook 的 url，重复装不产生重复条目。而且「没变就不写」，所以重装也不会刷出一堆备份文件。
+
+**只卸自己的。** 卸载只摘掉指向 `127.0.0.1:47800` 的 http hook。特别注意 `Notification` 事件下通常还有**别的** hook（比如 toast 脚本，`command` 类型、matcher 更窄），绝不能连它一起删。
+
+改动前会备份成 `settings.json.bak-<epoch 毫秒>`，写入走临时文件 + rename。尊重 `CLAUDE_CONFIG_DIR`。
 
 自启走 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`，注册的是**调用时那个 exe 的路径**。所以要从安装好的位置调用，别从 `target\debug\` 开自启。
 
