@@ -19,6 +19,7 @@ mod hooks;
 mod i18n;
 mod persist;
 mod sound;
+mod usage;
 
 use agent::Agent;
 
@@ -1194,6 +1195,42 @@ struct SettingsView {
     about: AboutInfo,
 }
 
+/// 用量 / 成本。全部从本地文件读 —— 不联网、不碰任何凭据。
+///
+/// 只统计**已启用**的 agent：没勾选的既不该扫（白付 IO），
+/// 也不该出现在面板里（用户明确说了不看它）。
+#[tauri::command]
+fn get_usage(app: AppHandle, prefs: tauri::State<PrefsState>) -> Vec<usage::AgentUsage> {
+    let (window, enabled) = match prefs.lock() {
+        Ok(p) => (p.discover_window(), p.enabled_agents()),
+        Err(_) => (persist::Prefs::default().discover_window(), vec![Agent::ClaudeCode]),
+    };
+    let home = app.path().home_dir().ok();
+    let mut out = Vec::new();
+
+    for a in enabled {
+        match a {
+            Agent::ClaudeCode => {
+                if let Some(dir) = discover::projects_dir(home.clone()) {
+                    out.push(usage::claude_code(&dir, window));
+                }
+            }
+            Agent::Codex => {
+                if let Some(dir) = codex::sessions_dir(home.clone()) {
+                    out.push(usage::codex(&dir, window));
+                }
+            }
+            Agent::OpenClaw => {
+                if let Some(dir) = gateway::openclaw_home(home.clone()) {
+                    out.push(usage::openclaw(&dir, window));
+                }
+            }
+            Agent::Hermes => out.push(usage::hermes()),
+        }
+    }
+    out
+}
+
 #[tauri::command]
 fn get_settings(app: AppHandle, prefs: tauri::State<PrefsState>) -> SettingsView {
     let current = prefs.lock().map(|p| p.clone()).unwrap_or_default();
@@ -1572,6 +1609,66 @@ fn handle_open_cli(app: &tauri::App) -> Option<i32> {
     }
 }
 
+/// 处理 `--usage`：把用量以 JSON 打到 stdout。
+///
+/// 存在的理由有两个，都不是「顺手加的」：
+///
+/// 1. **可核对。** 面板里的数字是从本地文件算出来的，而算错的方式很隐蔽
+///    （第一版就因为一个 8MB 读取上限少算了三成，界面上毫无迹象）。有个能把
+///    数字倒出来的命令，就能拿它和独立重算的结果逐项比。
+/// 2. 和已有的 `--hooks-status` / `--autostart-status` 一路：这些无头命令让
+///    挂件不必打开也能问出状态。
+///
+/// 走 stdout（不是 stderr）因为它是**数据**；诊断信息仍然走 stderr，
+/// 这样 `claude-pet --usage > u.json` 拿到的是干净的 JSON。
+fn handle_usage_cli(app: &tauri::App) -> Option<i32> {
+    if !std::env::args().any(|a| a == "--usage") {
+        return None;
+    }
+    let handle = app.handle();
+    let prefs = persist::load_prefs(handle);
+    let window = prefs.discover_window();
+    let home = handle.path().home_dir().ok();
+    let mut out: Vec<usage::AgentUsage> = Vec::new();
+
+    for a in prefs.enabled_agents() {
+        match a {
+            Agent::ClaudeCode => {
+                if let Some(dir) = discover::projects_dir(home.clone()) {
+                    out.push(usage::claude_code(&dir, window));
+                }
+            }
+            Agent::Codex => {
+                if let Some(dir) = codex::sessions_dir(home.clone()) {
+                    out.push(usage::codex(&dir, window));
+                }
+            }
+            Agent::OpenClaw => {
+                if let Some(dir) = gateway::openclaw_home(home.clone()) {
+                    out.push(usage::openclaw(&dir, window));
+                }
+            }
+            Agent::Hermes => out.push(usage::hermes()),
+        }
+    }
+
+    eprintln!(
+        "[claude-pet] 用量统计范围：最近 {} 分钟，agent = {}",
+        prefs.discover_window_minutes,
+        prefs.agents.join(",")
+    );
+    match serde_json::to_string_pretty(&out) {
+        Ok(s) => {
+            println!("{s}");
+            Some(0)
+        }
+        Err(e) => {
+            eprintln!("[claude-pet] 序列化用量失败: {e}");
+            Some(1)
+        }
+    }
+}
+
 /// 处理 `--install-hooks` / `--uninstall-hooks` / `--hooks-status`。
 /// 约定与 autostart 那组一致：用退出码传结果。
 fn handle_hooks_cli(app: &tauri::App) -> Option<i32> {
@@ -1787,6 +1884,7 @@ fn main() {
             get_boot,
             resize_pet,
             get_settings,
+            get_usage,
             apply_prefs,
             set_autostart,
             preview_sound,
@@ -1805,6 +1903,9 @@ fn main() {
                 std::process::exit(code);
             }
             if let Some(code) = handle_open_cli(app) {
+                std::process::exit(code);
+            }
+            if let Some(code) = handle_usage_cli(app) {
                 std::process::exit(code);
             }
 

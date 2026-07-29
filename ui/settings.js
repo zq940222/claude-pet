@@ -29,6 +29,9 @@ const ui = {
   permOn: el("permOn"),
   permMatcher: el("permMatcher"),
   permHint: el("permHint"),
+  usageBody: el("usageBody"),
+  usageHint: el("usageHint"),
+  usageRefresh: el("usageRefresh"),
   version: el("version"),
   port: el("port"),
   configDir: el("configDir"),
@@ -220,6 +223,145 @@ function fill(v) {
   ui.checkUpdates.checked = prefs.check_updates;
 }
 
+// ── 用量面板 ─────────────────────────────────────────────────
+
+/// 千分位。token 数动辄七位，不分组根本读不出量级。
+const nf = new Intl.NumberFormat();
+
+/// 「还剩 3 小时 12 分」。配额的重置时间点单独看没意义 ——
+/// 有用的是「还要等多久」。
+function untilText(ms) {
+  const left = ms - Date.now();
+  if (left <= 0) return t("usage.resetsNow");
+  const mins = Math.round(left / 60000);
+  if (mins < 60) return t("usage.resetsInMin", { n: mins });
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return m ? t("usage.resetsInHM", { h, m }) : t("usage.resetsInH", { h });
+}
+
+function usageCard(u) {
+  const card = document.createElement("div");
+  card.className = "usage-card";
+
+  const head = document.createElement("div");
+  head.className = "usage-head";
+  const name = document.createElement("span");
+  name.className = "usage-agent";
+  name.textContent = u.label;
+  head.appendChild(name);
+
+  const n = document.createElement("span");
+  n.className = "usage-sessions";
+  n.textContent = t("usage.sessions", { n: u.sessions });
+  head.appendChild(n);
+
+  // 只有 agent 自己算好成本时才显示。我们刻意不内置价目表 ——
+  // 价格会变，过期的表是默默显示错数字，比没有数字更坑人。
+  if (typeof u.cost_usd === "number") {
+    const c = document.createElement("span");
+    c.className = "usage-cost";
+    c.textContent = `$${u.cost_usd.toFixed(4)}`;
+    head.appendChild(c);
+  }
+  card.appendChild(head);
+
+  const toks = document.createElement("div");
+  toks.className = "usage-tokens";
+  for (const [key, val] of [
+    ["usage.in", u.tokens.input],
+    ["usage.out", u.tokens.output],
+    ["usage.cacheRead", u.tokens.cache_read],
+    ["usage.cacheWrite", u.tokens.cache_write],
+    ["usage.total", u.tokens.total],
+  ]) {
+    // 0 的项不显示：四个 agent 的字段口径不同，恒为 0 的格子只是噪音
+    if (!val) continue;
+    const s = document.createElement("span");
+    const k = document.createElement("span");
+    k.className = "k";
+    k.textContent = t(key) + " ";
+    s.appendChild(k);
+    const b = document.createElement("b");
+    b.textContent = nf.format(val);
+    s.appendChild(b);
+    toks.appendChild(s);
+  }
+  if (!toks.children.length) {
+    const s = document.createElement("span");
+    s.className = "k";
+    s.textContent = t("usage.none");
+    toks.appendChild(s);
+  }
+  card.appendChild(toks);
+
+  if (u.quota) {
+    const q = document.createElement("div");
+    q.className = "usage-quota";
+
+    const bar = document.createElement("div");
+    const pct = Math.max(0, Math.min(100, u.quota.used_percent));
+    // 快满了才变色 —— 任何比例都染红等于永远在报警
+    bar.className =
+      "usage-bar" + (pct >= 90 ? " danger" : pct >= 75 ? " warn" : "");
+    const fill = document.createElement("i");
+    fill.style.width = `${pct}%`;
+    bar.appendChild(fill);
+    q.appendChild(bar);
+
+    const meta = document.createElement("div");
+    meta.className = "usage-quota-meta";
+    const left = document.createElement("span");
+    left.textContent = t("usage.quotaUsed", {
+      pct: pct.toFixed(1),
+      plan: u.quota.plan || t("usage.planUnknown"),
+    });
+    meta.appendChild(left);
+    if (u.quota.resets_at_ms) {
+      const right = document.createElement("span");
+      right.textContent = untilText(u.quota.resets_at_ms);
+      meta.appendChild(right);
+    }
+    q.appendChild(meta);
+    card.appendChild(q);
+  }
+
+  // note 是 i18n 的键，说明「为什么某些格子是空的」。
+  // 留空让用户猜是坏了还是没有，比多一行字糟。
+  if (u.note) {
+    const note = document.createElement("p");
+    note.className = "usage-note";
+    note.textContent = t(u.note);
+    card.appendChild(note);
+  }
+
+  return card;
+}
+
+async function refreshUsage() {
+  ui.usageRefresh.disabled = true;
+  ui.usageBody.textContent = "";
+  ui.usageHint.textContent = t("usage.reading");
+  try {
+    const list = await invoke("get_usage");
+    ui.usageBody.textContent = "";
+    if (!list.length) {
+      ui.usageHint.textContent = t("usage.noAgents");
+      return;
+    }
+    for (const u of list) ui.usageBody.appendChild(usageCard(u));
+    // 说清楚统计范围。不说的话「只有 3 个会话」会被当成 bug，
+    // 而实际是时间窗把更早的排除了。
+    ui.usageHint.textContent = t("usage.windowHint", {
+      min: prefs.discover_window_minutes,
+    });
+  } catch (e) {
+    ui.usageHint.textContent = t("usage.failed", { err: e });
+  } finally {
+    ui.usageRefresh.disabled = false;
+  }
+}
+
 async function runUpdateCheck(about) {
   ui.checkNow.disabled = true;
   ui.updateResult.textContent = t("set.checking");
@@ -284,8 +426,10 @@ function wire() {
     prefs.agents = Array.from(ui.agents.querySelectorAll("input:checked")).map(
       (b) => b.value
     );
-    apply("what.agents");
+    apply("what.agents").then(refreshUsage);
   });
+
+  ui.usageRefresh.addEventListener("click", refreshUsage);
 
   ui.position.addEventListener("change", () => {
     prefs.position_mode = ui.position.value;
@@ -418,6 +562,9 @@ async function init() {
     return;
   }
   wire();
+  // 用量要扫本地文件（本机 651 个转录），所以不阻塞设置窗口出现 ——
+  // 不 await，扫完自己填进去。
+  refreshUsage();
 }
 
 init();

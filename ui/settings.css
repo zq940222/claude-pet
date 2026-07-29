@@ -121,6 +121,83 @@ label.row {
   font-weight: 500;
 }
 
+/* ── 用量面板 ────────────────────────────────────────────── */
+
+.usage-card {
+  border: 1px solid #2b313b;
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+}
+.usage-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.usage-agent {
+  font-weight: 600;
+}
+.usage-sessions {
+  color: #7d8695;
+  font-size: 12px;
+}
+.usage-cost {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+/* token 数用等宽数字，否则几行数字对不齐、扫一眼看不出量级差异 */
+.usage-tokens {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.usage-tokens span b {
+  font-weight: 600;
+}
+.usage-tokens .k {
+  color: #7d8695;
+}
+
+/* 配额条。只有 Codex 有真实配额，其它 agent 这块不渲染 */
+.usage-quota {
+  margin-top: 7px;
+}
+.usage-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: #2b313b;
+  overflow: hidden;
+}
+.usage-bar > i {
+  display: block;
+  height: 100%;
+  background: #4a9eff;
+}
+/* 快满了才变色。任何比例都染红等于永远在报警，用户很快就不看了 */
+.usage-bar.warn > i {
+  background: #f0a92b;
+}
+.usage-bar.danger > i {
+  background: #ff5f56;
+}
+.usage-quota-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+  color: #7d8695;
+  margin-top: 3px;
+}
+/* 「成本需价目表」这类说明。是解释而不是错误，所以不用警告色 */
+.usage-note {
+  color: #7d8695;
+  font-size: 12px;
+  margin-top: 6px;
+}
+
 .unit {
   color: #7d8695;
   font-size: 12px;

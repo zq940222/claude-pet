@@ -10,6 +10,13 @@
 
 ### Added
 
+- **用量 / 成本面板**（#11）—— 设置窗口的「用量」组，每个启用的 agent 一张卡：token、成本（有的话）、真实配额条 + 重置倒计时。另有 `claude-pet.exe --usage` 把同样的数据以 JSON 打到 stdout（诊断走 stderr，所以重定向拿到的是干净 JSON）。
+  - **全部读自本地文件，不联网、不碰凭据。** TermiPet 的做法是拿本机凭据请求官方端点，我们刻意不做 —— 一个常驻置顶的小挂件不该多出「凭据读取」和「网络出口」两个面
+  - **不内置价目表。** Claude Code 只有 token，算美元就得内置价格；价格会变，过期的表是**默默显示错数字**，比没有金额更坑人。所以只显示 agent 自己算好的成本（OpenClaw 的 `estimatedCostUsd`），其余只显示 token 并在卡片上说明原因。同理 Codex 的 `rate_limits` 整块为 null 时**不渲染配额条**，而不是显示「已用 0%」
+  - **按 `requestId` 去重** —— 一次 API 请求会写多条 assistant 行、每条都带同一份 `usage`。实测本机一个转录 1354 行对 613 个 requestId（虚高 161.7%），全部转录 6531 行对 2855 个。另排掉 `model` 为 `<synthetic>` 的行
+  - **Codex 的累计值取最后一条不相加** —— `info.total_token_usage` 是会话累计而非增量，逐条加会把同一会话重复计入几十次。`rate_limits` 是账户级的，取最新的一份
+  - **Hermes 暂不读**（数据在 SQLite，要加 `rusqlite`、二进制约 +1MB）。卡片上写明原因而不是让它从列表里消失
+
 - **支持 Codex / Hermes / OpenClaw**（#13）—— 设置窗口里勾选要盯哪些 agent，默认只开 Claude Code。四个 agent 的处理方式**不一样**，因为实测能拿到的东西不一样：
   - **Codex 是一等公民**，和 Claude Code 完全同构：按 cwd 分工作空间、一个会话一只宠物。状态从 `~/.codex/sessions/**/rollout-*.jsonl` 的**尾部**读 `task_started` / `task_complete` 两个边界事件（语义等同 Claude Code 的 `UserPromptSubmit` / `Stop`，所以复用同一套状态名和视觉）。刻意不看 `agent_message` / `function_call` —— 那些一轮里出现几十次，会把「刚说完一句话」误当成「结束了」
   - **Hermes / OpenClaw 各一只 gateway 宠物**，放在以自己命名的工作空间里，只回答「在不在跑」。它们**不是**按项目的交互式 agent：Hermes 的 `sessions` 表虽有 `cwd` / `ended_at` 列，但本机 22 条里只有 2 条 `cwd` 非空、16 条 `ended_at` 永远是 null，硬做成会话宠物会得到一堆永远「在跑」、永远归不进项目的僵尸；OpenClaw 是单 agent 从 20 多个聊天入口进来，`workspaceDir` 恒为 gateway 自己的工作区，`status` 只有 `done`/`failed`/`timeout`（运行结果，不是此刻状态）
@@ -21,10 +28,6 @@
   - **agent 走边框样式，不走颜色** —— 颜色整条通道已被状态占满（红 = 要你动手）。实线 = Claude Code、虚线 = Codex、双线 = gateway，且 `border-style` 不改变盒模型尺寸，不会牵动「量卡片得出窗口尺寸」那套逻辑。折叠态 11px 的点刻意不区分：那个尺寸上形状差异不可读，而折叠条只需要回答「有没有红的」
   - 缓存版本升到 3；gateway 宠物 `cwd` 为空串，双击跳编辑器会被拦住并提示而不是报一个看不懂的错
   - 尊重 `CODEX_HOME` / `HERMES_HOME` / `OPENCLAW_CONFIG_DIR`
-
-### Fixed
-
-- **gateway 宠物的 detail 在英文界面下混中文** —— 那行文案是探测时现拼的，第一版直接写了中文字面量。现在走 `i18n`，和 hook 生成的 detail 一致。测试里加了一条 CJK 断言守住。
 
 - **Windows 安装包**（#17）—— `cargo tauri build --bundles nsis` 产出 1.21 MB 的 `claude-pet-x.y.z-x64-setup.exe`。`installMode: currentUser` → `RequestExecutionLevel user`，**不弹 UAC**，装到 `%LOCALAPPDATA%\Claude Pet\`，建开始菜单 + 桌面快捷方式，安装界面可选简体中文 / English。发布时同时产出安装包和原来的绿色 zip。
   - **`NSIS_HOOK_PREINSTALL` 清理 `install.ps1` 的旧副本** —— 两种安装方式装到不同目录（`ClaudePet` vs `Claude Pet`），但自启只有**一个**值名 `HKCU\...\Run\Claude Pet`。不清理的话会留下两份 exe，自启指向后装的那份，另一份成为永远不会被更新的孤儿。反方向由 `install.ps1` 检测卸载注册表键后**直接拒绝**安装
@@ -41,6 +44,12 @@
   - 实测本机所有 Claude Code 会话**都不在终端里**：真实宿主是 Claude 桌面应用，对全部会话只暴露一个 HWND 和一个不含项目名的标题
   - 唯一未走到底的线索是 `claude://` 深链（协议已注册，二进制含 `deeplink`，但无 `--session` 类字符串）；刻意没探测，因为那会导航用户正在使用的应用
   - README 中相应说法从「另有 issue 调研」更新为结论 + ADR 链接
+
+### Fixed
+
+- **用量面板少算三成，且界面上毫无迹象** —— 第一版抄了 `discover.rs` 的字节上限模式，把每个文件封在 8MB。本机当前会话的转录有 11.5MB，于是 `cache_read` 显示 767,420,613 而真实值是 1,119,001,795。`discover.rs` 封顶是对的（它只要头部的 `cwd`），用量要全部行，任何上限都等于默默少算 —— 正是这个面板拒绝内置价目表的那个理由。现已去掉上限，并与独立重算逐项比对到 drift 0.000%。
+
+- **gateway 宠物的 detail 在英文界面下混中文**（#13）—— 那行文案是探测时现拼的，第一版写了中文字面量。现在走 `i18n`，测试里加了 CJK 断言守住。
 
 ## [0.2.0] - 2026-07-29
 ### Added

@@ -78,6 +78,33 @@
     "set.positionHint":
       "「右下角」和「顶部居中」是<strong>吸附</strong>模式，位置由屏幕算出来，拖动不留痕；想拖到哪算哪就选「跟随上次拖动」。多显示器下吸附到挂件当前所在的那块屏。",
 
+    // ── 用量面板 ──
+    "usage.title": "用量",
+    "usage.refresh": "刷新",
+    "usage.reading": "读取中…",
+    "usage.sessions": "{n} 个会话",
+    "usage.in": "输入",
+    "usage.out": "输出",
+    "usage.cacheRead": "缓存读",
+    "usage.cacheWrite": "缓存写",
+    "usage.total": "合计",
+    "usage.none": "这个时间窗内没有用量",
+    "usage.quotaUsed": "已用 {pct}%（{plan}）",
+    "usage.planUnknown": "套餐未知",
+    "usage.resetsNow": "即将重置",
+    "usage.resetsInMin": "{n} 分钟后重置",
+    "usage.resetsInH": "{h} 小时后重置",
+    "usage.resetsInHM": "{h} 小时 {m} 分后重置",
+    "usage.windowHint":
+      "全部读自本地文件，不联网、不碰任何凭据。统计范围跟随上面的会话发现时间窗（{min} 分钟）。",
+    "usage.noAgents": "没有启用任何 agent",
+    "usage.failed": "读取用量失败：{err}",
+    "usage.noCostNoQuota":
+      "转录里只有 token，没有成本也没有账户配额。刻意不内置价目表 —— 价格会变，过期的表会默默显示错数字。已按 requestId 去重（一次请求会写多条 assistant 行、各带同一份 usage，不去重实测虚高 161.7%）。",
+    "usage.noCost": "配额是真实的账户数据。成本 Codex 本地没写，同样不编造。",
+    "usage.noQuota": "成本是 OpenClaw 自己算好的（estimatedCostUsd），不是我们估的。本地没有账户配额。",
+    "usage.needsSqlite":
+      "Hermes 的用量在 SQLite（state.db 的 session_model_usage 表，连 estimated 和 actual cost 都分开存），读它要给项目加 rusqlite 依赖，二进制约 +1MB。这是明确的取舍，不是遗漏。",
     "set.sound": "提示音",
     "set.soundOn": "进入等待态时提示",
     "set.soundOnHint": "只在状态「变成」等待态时响一次，同一等待态的重复事件不响。",
@@ -206,6 +233,33 @@
     "set.positionHint":
       "Bottom right and top centre are <strong>snap</strong> modes: the position is computed from the screen and dragging does not stick. Pick the last option to place it yourself. On multiple monitors it snaps to whichever monitor the widget is currently on.",
 
+    // ── usage panel ──
+    "usage.title": "Usage",
+    "usage.refresh": "Refresh",
+    "usage.reading": "Reading…",
+    "usage.sessions": "{n} sessions",
+    "usage.in": "in",
+    "usage.out": "out",
+    "usage.cacheRead": "cache read",
+    "usage.cacheWrite": "cache write",
+    "usage.total": "total",
+    "usage.none": "No usage inside this window",
+    "usage.quotaUsed": "{pct}% used ({plan})",
+    "usage.planUnknown": "plan unknown",
+    "usage.resetsNow": "resetting now",
+    "usage.resetsInMin": "resets in {n} min",
+    "usage.resetsInH": "resets in {h}h",
+    "usage.resetsInHM": "resets in {h}h {m}m",
+    "usage.windowHint":
+      "All read from local files — no network, no credentials touched. Scope follows the session discovery window above ({min} minutes).",
+    "usage.noAgents": "No agents enabled",
+    "usage.failed": "Could not read usage: {err}",
+    "usage.noCostNoQuota":
+      "Transcripts carry tokens only — no cost and no account quota. A price table is deliberately not baked in: prices change and a stale table silently shows wrong numbers. Deduplicated by requestId (one request writes several assistant lines all carrying the same usage; not deduplicating inflated output tokens by 161.7% here).",
+    "usage.noCost": "The quota is real account data. Codex does not write cost locally, and we do not invent it.",
+    "usage.noQuota": "The cost is OpenClaw's own estimatedCostUsd, not our estimate. No account quota is available locally.",
+    "usage.needsSqlite":
+      "Hermes keeps usage in SQLite (state.db, session_model_usage, with estimated and actual cost stored separately). Reading it would mean taking on a rusqlite dependency, roughly +1MB of binary. A deliberate trade-off, not an oversight.",
     "set.sound": "Sound",
     "set.soundOn": "Play a sound when a session starts waiting",
     "set.soundOnHint":

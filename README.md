@@ -171,6 +171,55 @@ pid 判活的已知弱点：pid 会被系统回收，理论上可能有别的进
 
 gateway 宠物没有项目目录（`cwd` 是空串），双击跳回编辑器会被拦住并提示，而不是去调用 `open_in_editor` 然后报一个看不懂的错。
 
+## 用量 / 成本面板
+
+设置窗口 →「用量」。每个启用的 agent 一张卡：token、成本（有的话）、账户配额条 + 重置倒计时。
+
+**全部读自本地文件，不联网、不碰任何凭据。** [TermiPet](https://github.com/bleeeet/TermiPet)（macOS）的做法是拿本机登录凭据去请求官方端点，所以能给出统一的剩余额度。我们刻意不这么做 —— 那要求一个常驻置顶的小挂件读你的凭据并定期对外发请求，多出「凭据读取」和「网络出口」两个面。本地文件能到什么程度：
+
+| agent | token | 成本 | 账户配额 |
+| --- | --- | --- | --- |
+| Claude Code | ✅ 每条 assistant 的 `usage.*` | ❌ 转录里没有 | ❌ 转录里没有 |
+| Codex | ✅ `info.total_token_usage.*` | ❌ | ✅ **真实的** `rate_limits.primary` |
+| OpenClaw | ✅ `inputTokens` / `outputTokens` | ✅ 现成的 `estimatedCostUsd` | ❌ |
+| Hermes | 在 SQLite 里，暂不读 | 在 SQLite 里 | ❌ |
+
+也有个命令行出口，方便核对和脚本化：
+
+```bash
+claude-pet.exe --usage
+```
+
+JSON 走 stdout、诊断走 stderr，所以 `claude-pet --usage > u.json` 拿到的是干净的 JSON。
+
+### 不内置价目表
+
+Claude Code 只有 token。要算出美元就得在仓库里写一张价目表，而**价格会变，过期的表是默默显示错数字** —— 一个错的金额比没有金额更坑人。所以：agent 自己算好的成本就显示（OpenClaw 的 `estimatedCostUsd`），没有的就只显示 token 并在卡片上说明原因。
+
+同理，Codex 的 `rate_limits` 整块经常是 null（用 API key 或自建 provider 时没有套餐配额），那种情况**不渲染配额条**而不是显示「已用 0%」—— 后者是在撒谎。
+
+### 一次请求会写多条 assistant 行，必须按 `requestId` 去重
+
+Claude Code 的转录里，一次 API 请求会写**多条** `assistant` 行（一条内容块一行），**每条都带同一份 `usage` 对象**。本机实测：一个转录里 1354 条带 usage 的 assistant 行只对应 **613 个** `requestId`，直接累加 `output_tokens` 会虚高 **161.7%**；跨全部转录是 6531 行对 2855 个 requestId。
+
+另外 `model` 为 `<synthetic>` 的要排掉 —— 那是本地合成的消息，没有真实 API 调用。
+
+### 读文件**不能**设字节上限
+
+第一版抄了 `discover.rs` 的 `MAX_HEAD_BYTES` 模式，封在 8MB。那是错的，而且错得很隐蔽：本机当前会话的转录有 11.5MB，于是面板里的 token 只有真实值的约 69%（`cache_read` 显示 767,420,613，真实是 1,119,001,795），**界面上没有任何迹象说明它被截断了**。
+
+`discover.rs` 封顶是对的 —— 它只要头部的 `cwd`。用量要全部行，任何上限都等于默默少算。而「默默显示错数字」正是这个面板拒绝内置价目表的理由，自己在这儿犯一遍说不过去。
+
+### Codex 的累计值要取最后一条，不能相加
+
+每个 rollout 里的 `token_count` 事件带 `info.total_token_usage`，那是**该会话的累计值**而不是增量。所以每个文件只取最后一条再跨文件相加；逐条累加会把同一个会话重复计入几十次。
+
+`rate_limits` 是**账户级**的、跨会话共享，所以取时间上最新的那一份而不是相加。
+
+### Hermes 暂不读
+
+它的数据其实是四个里最全的 —— `state.db` 的 `session_model_usage` 表连 `estimated_cost_usd` 和 `actual_cost_usd` 都分开存。但读 SQLite 要给项目加 `rusqlite` 依赖（bundled 要从源码编 SQLite，二进制约 +1MB）。这是个**明确的取舍，不是遗漏**，卡片上直接写明了原因。
+
 ## 一个会话 = 一只宠物，一个项目 = 一个工作空间
 
 `session_id` 唯一确定一只宠物；`cwd` 的末段作为工作空间名把宠物归组。宠物顺序按 `first_seen` 排 —— HashMap 的迭代顺序是随机的，不排序图标每次刷新都会乱跳。
