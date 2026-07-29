@@ -92,6 +92,29 @@ if ($Uninstall) {
     return
 }
 
+# -- Refuse to sit next to an installer-based install ----------
+#
+# The NSIS installer puts the exe in "%LOCALAPPDATA%\Claude Pet" while this
+# script uses "%LOCALAPPDATA%\ClaudePet". Two directories, but only ONE
+# autostart value name (HKCU\...\Run\Claude Pet), so whichever ran last wins
+# and the other copy becomes an orphan that never gets updated. Stop instead
+# of quietly creating that mess.
+#
+# Checked via the uninstall registry key rather than the directory: a leftover
+# folder is not proof of an install, and the key is what "Apps & features"
+# actually reads.
+$nsisKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Claude Pet'
+if (Test-Path $nsisKey) {
+    $where = (Get-ItemProperty $nsisKey -Name 'InstallLocation' -ErrorAction SilentlyContinue).InstallLocation
+    Die @"
+Claude Pet is already installed by the Windows installer$(if ($where) { " at`n    $where" }).
+
+Pick one, not both -- they share the single autostart entry:
+  * keep the installer   -> just run it again to upgrade, this script is not needed
+  * switch to this script -> uninstall "Claude Pet" from Settings > Apps first
+"@
+}
+
 # -- Locate the release ---------------------------------------
 
 Step 'looking up release'

@@ -29,6 +29,18 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/icon.ico"]
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/icon.ico"],
+    "publisher": "claude-pet contributors",
+    "copyright": "Copyright © 2026 claude-pet contributors",
+    "shortDescription": "常驻置顶的 Claude Code 状态挂件",
+    "longDescription": "一个会话一只宠物，一个项目一个工作空间。干活时收起，需要你回答时自动展开。",
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["SimpChinese", "English"],
+        "displayLanguageSelector": true,
+        "installerHooks": "nsis-hooks.nsh"
+      }
+    }
   }
 }

@@ -55,6 +55,12 @@ foreach ($tool in 'cargo', 'git', 'gh') {
     }
 }
 
+# tauri-cli 打安装包用。不是 cargo 自带的子命令，要单独装。
+cargo tauri --version *> $null
+if ($LASTEXITCODE -ne 0) {
+    Die "cargo-tauri not found. install it with: cargo install tauri-cli --version '^2'"
+}
+
 Push-Location $repoRoot
 try {
     # 工作区必须干净 —— 否则 tag 指向的内容和你以为的不一样
@@ -93,9 +99,11 @@ try {
         Warn 'dry run: stopping here. Would have:'
         Write-Host "     - set version = `"$new`" in src-tauri/Cargo.toml"
         Write-Host "     - moved CHANGELOG [Unreleased] into a [$new] section"
-        Write-Host "     - cargo build --release"
+        Write-Host "     - cargo tauri build --bundles nsis"
         Write-Host "     - git commit + tag $tag + push"
-        Write-Host "     - gh release create $tag with claude-pet-$new-windows-x64.zip"
+        Write-Host "     - gh release create $tag with:"
+        Write-Host "         claude-pet-$new-windows-x64.zip       (green, unzip and run)"
+        Write-Host "         claude-pet-$new-x64-setup.exe         (installer)"
         exit 0
     }
 
@@ -131,14 +139,35 @@ try {
 
     # ── 构建 ─────────────────────────────────────────────────
 
-    Step 'cargo build --release  (this takes a few minutes)'
-    Push-Location (Join-Path $repoRoot 'src-tauri')
+    # 一次跑 cargo tauri build 同时产出 exe 和 NSIS 安装包 ——
+    # 它内部就是 cargo build --release 再打包，没必要分两步编译。
+    Step 'cargo tauri build --bundles nsis  (this takes a few minutes)'
+    Push-Location $repoRoot
     try {
         # 运行中的 exe 会锁住输出文件
         Get-Process claude-pet -ErrorAction SilentlyContinue | Stop-Process -Force
         Start-Sleep -Milliseconds 600
-        cargo build --release
-        if ($LASTEXITCODE -ne 0) { Die 'release build failed' }
+        cargo tauri build --bundles nsis
+        if ($LASTEXITCODE -ne 0) {
+            # 最常见的失败不是代码问题，而是 NSIS 工具链下不下来：
+            # tauri-bundler 的下载器没有重试，网络抖一下就是
+            # `io: unexpected end of file`，报错完全看不出是网络。
+            Die @"
+tauri build failed.
+
+If it said ``io: unexpected end of file`` while downloading NSIS, that is the
+bundler's downloader giving up with no retry -- not a problem with this repo.
+Seed the toolchain by hand and re-run:
+
+  `$c = Join-Path `$env:LOCALAPPDATA 'tauri'
+  curl -fL --retry 5 --retry-all-errors -o "`$c\nsis-3.11.zip" ``
+    https://github.com/tauri-apps/binary-releases/releases/download/nsis-3.11/nsis-3.11.zip
+  Expand-Archive "`$c\nsis-3.11.zip" "`$c" ; Rename-Item "`$c\nsis-3.11" "`$c\NSIS"
+  `$d = "`$c\NSIS\Plugins\x86-unicode\additional" ; New-Item -ItemType Directory -Force `$d
+  curl -fL --retry 5 --retry-all-errors -o "`$d\nsis_tauri_utils.dll" ``
+    https://github.com/tauri-apps/nsis-tauri-utils/releases/download/nsis_tauri_utils-v0.5.3/nsis_tauri_utils.dll
+"@
+        }
     } finally { Pop-Location }
 
     $exe = Join-Path $repoRoot 'src-tauri\target\release\claude-pet.exe'
@@ -153,6 +182,20 @@ try {
     if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
     Compress-Archive -Path $exe -DestinationPath $zipPath
     Step "packaged $zipName"
+
+    # 安装包重命名去掉空格。tauri 用 productName（"Claude Pet"）做文件名，
+    # 带空格的资源名在下载 URL 里会变成 Claude%20Pet_...，
+    # install.ps1 和 README 里的链接都得跟着转义，不值得。
+    $nsisDir = Join-Path $repoRoot 'src-tauri\target\release\bundle\nsis'
+    $built = Get-ChildItem $nsisDir -Filter '*-setup.exe' -ErrorAction SilentlyContinue |
+             Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if (-not $built) { Die "no installer found in $nsisDir" }
+    $setupName = "claude-pet-$new-x64-setup.exe"
+    $setupPath = Join-Path $nsisDir $setupName
+    if (Test-Path $setupPath) { Remove-Item $setupPath -Force }
+    Copy-Item $built.FullName $setupPath
+    $setupMb = [math]::Round((Get-Item $setupPath).Length / 1MB, 2)
+    Step "packaged $setupName ($setupMb MB)"
 
     # ── 提交 / tag / 推送 ────────────────────────────────────
 
@@ -177,13 +220,17 @@ try {
     # release notes 要给 GitHub 看，中文必须是正确的 UTF-8
     Write-Utf8 $notesFile $notes
 
-    gh release create $tag $zipPath --title $tag --notes-file $notesFile
+    # 安装包放前面，它是 README 里推荐的首选方式
+    gh release create $tag $setupPath $zipPath --title $tag --notes-file $notesFile
     if ($LASTEXITCODE -ne 0) { Die 'gh release create failed' }
     Remove-Item $notesFile -Force -ErrorAction SilentlyContinue
 
     Step "done: $tag published"
     Write-Host ""
-    Write-Host "install it anywhere with:" -ForegroundColor Green
+    Write-Host "double-click installer:" -ForegroundColor Green
+    Write-Host "  https://github.com/zq940222/claude-pet/releases/download/$tag/$setupName"
+    Write-Host ""
+    Write-Host "or one-line, no installer:" -ForegroundColor Green
     Write-Host "  irm https://raw.githubusercontent.com/zq940222/claude-pet/main/tools/install.ps1 | iex"
 }
 finally { Pop-Location }

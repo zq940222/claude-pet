@@ -10,6 +10,15 @@
 
 ### Added
 
+- **Windows 安装包**（#17）—— `cargo tauri build --bundles nsis` 产出 1.21 MB 的 `claude-pet-x.y.z-x64-setup.exe`。`installMode: currentUser` → `RequestExecutionLevel user`，**不弹 UAC**，装到 `%LOCALAPPDATA%\Claude Pet\`，建开始菜单 + 桌面快捷方式，安装界面可选简体中文 / English。发布时同时产出安装包和原来的绿色 zip。
+  - **`NSIS_HOOK_PREINSTALL` 清理 `install.ps1` 的旧副本** —— 两种安装方式装到不同目录（`ClaudePet` vs `Claude Pet`），但自启只有**一个**值名 `HKCU\...\Run\Claude Pet`。不清理的话会留下两份 exe，自启指向后装的那份，另一份成为永远不会被更新的孤儿。反方向由 `install.ps1` 检测卸载注册表键后**直接拒绝**安装
+  - **偏好刻意不删** —— 卸载器的「删除应用数据」只清 `%LOCALAPPDATA%\com.opsmateai.claude-pet`（WebView2 缓存），我们的 `prefs.json` / `sessions.json` / `window-anchor.json` 在 `%APPDATA%` 下，卸载后保留、重装即恢复
+  - 补上 `bundle.publisher` / `copyright` —— 之前 exe 的版本资源里 `CompanyName` 和 `LegalCopyright` 是空的，配上未签名的 SmartScreen 警告观感很差
+  - 产物重命名去掉空格：tauri 用 `productName` 当文件名，`Claude Pet_...` 在下载 URL 里会变成 `%20`
+  - **语言名是 `SimpChinese` 不是 `SimplifiedChinese`** —— 必须逐字对上 NSIS 的 `.nlf` 文件名。写错时 tauri 只警告一句「not translated」，真正的中止发生在 `makensis` 找不到 `.nlf`，两处分离容易看漏
+  - **`tauri-bundler` 下载 NSIS 工具链没有重试** —— 网络抖一下就抛 `io: unexpected end of file`，看起来像仓库坏了。同一个文件 `curl --retry` 一次就成。`release.ps1` 在这步失败时直接打印手动布置命令，README 记了缓存布局和两个 SHA1
+  - **仍然不上 `tauri-plugin-updater`** —— 安装包解掉了当初否掉它的产物形式问题，但私钥丢失会让所有已装版本永久失去更新能力，且发布流程要多产 `latest.json`。换来的只是少一次手动确认，维持「新版本提醒」
+
 - **[ADR 0001](docs/adr/0001-no-tab-precise-jump-back-on-windows.md)**（#12）—— 调研「跳回会话所在的终端 tab」，结论是**不实现**。
   - `wt` 确实有 `focus-tab --target`（`TerminalApp.dll` 里可查到），此前判断「不支持」是无效测试所致（PATH 上的 `wt.exe` 是 0 字节的 WindowsApps 别名 stub）
   - 但 `wt` **没有任何查询类子命令**，操作系统侧也无法把 ConPTY 映射到 tab 索引 —— 能命令、不能发现目标索引，等于不可实现

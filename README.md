@@ -6,6 +6,20 @@
 
 ## 安装
 
+### 安装包（推荐）
+
+从 [Releases](https://github.com/zq940222/claude-pet/releases/latest) 下载 `claude-pet-x.y.z-x64-setup.exe`，双击。
+
+装到 `%LOCALAPPDATA%\Claude Pet\`，建开始菜单和桌面快捷方式。**不需要管理员权限**（`installMode: currentUser`），安装界面可选简体中文或英文。升级就是再跑一次新版安装包。
+
+安装包**没有签名**，所以 SmartScreen 会拦一下 —— 「更多信息」→「仍要运行」。签名需要花钱买证书，这个项目暂时没有。
+
+装完还要配 hook，见下面那一节。
+
+### 一行命令（不装安装包）
+
+适合 CI、或者不想在「应用和功能」里多一条记录的人：
+
 ```powershell
 irm https://raw.githubusercontent.com/zq940222/claude-pet/main/tools/install.ps1 | iex
 ```
@@ -16,7 +30,16 @@ irm https://raw.githubusercontent.com/zq940222/claude-pet/main/tools/install.ps1
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/zq940222/claude-pet/main/tools/install.ps1))) -Autostart -WireHooks
 ```
 
-装到 `%LOCALAPPDATA%\ClaudePet\`，建开始菜单快捷方式，然后启动。其它参数：`-Version x.y.z` 装指定版本、`-NoLaunch` 装完不启动、`-Uninstall` 卸载（会同时关自启、摘掉 hook）。
+装到 `%LOCALAPPDATA%\ClaudePet\`（注意和安装包**不是同一个目录**），建开始菜单快捷方式，然后启动。其它参数：`-Version x.y.z` 装指定版本、`-NoLaunch` 装完不启动、`-Uninstall` 卸载（会同时关自启、摘掉 hook）。
+
+### 两种方式只能选一个
+
+自启只有一个注册表值名 `HKCU\...\Run\Claude Pet`，而两种方式装到不同目录。同时用会留下两份 exe，自启指向后装的那份，另一份变成永远不会被更新的孤儿。所以：
+
+- 脚本装过之后跑安装包 —— 安装包的 `NSIS_HOOK_PREINSTALL` 会自动清掉 `%LOCALAPPDATA%\ClaudePet`
+- 安装包装过之后跑脚本 —— 脚本会检测到并**直接拒绝**，让你先在「设置 → 应用」里卸载
+
+两种方式都**不会**碰 `%APPDATA%\com.opsmateai.claude-pet\` 里的 `prefs.json` / `sessions.json` / `window-anchor.json`。换安装方式、甚至卸载重装，设置都还在。卸载器的「删除应用数据」只清 `%LOCALAPPDATA%\com.opsmateai.claude-pet`（WebView2 的缓存），刻意不动偏好 —— 悄悄把用户的设置清零比留下三个小 JSON 糟得多。
 
 **没带 `-WireHooks` 的话还有一步**：挂件只有在 Claude Code 把事件 POST 给它之后才会亮，需要在 `~/.claude/settings.json` 里配 hook。可以随时补上：
 
@@ -130,15 +153,15 @@ cd src-tauri && cargo build --release
 
 ### 为什么不用 `tauri-plugin-updater`
 
-试过，不兼容我们的发布形式。读它的 Windows 安装逻辑（`updater.rs:883-913`）：接受 zip，但**解压后只认里面的 `.exe`（当成 NSIS 安装包）或 `.msi`**，然后拿 NSIS 的静默安装参数去执行。而我们发的 zip 里是应用本体，被那样执行不会安装任何东西。
+最初的理由是**产物形式不兼容**：读它的 Windows 安装逻辑（`updater.rs:883-913`），它接受 zip，但解压后只认里面的 `.exe`（当成 NSIS 安装包）或 `.msi`，而我们当时只发装着应用本体的 zip，被那样执行不会安装任何东西。
 
-要用那个插件就必须改发 NSIS 安装包，代价是：
+**这个理由现在已经不成立了** —— 我们同时发 NSIS 安装包，插件的前置条件满足了。但仍然不用它，剩下的理由是：
 
-- 丢掉「便携、免管理员、单 exe」这套已经发布并写进文档的形式
 - 多一把 minisign 私钥，而**私钥一旦丢失，所有已安装的版本永久失去更新能力**（它们只信任内嵌的那个公钥）
-- 安装位置从 `%LOCALAPPDATA%` 变到 NSIS 的目录，自启注册的路径跟着变
+- 发布流程要多产出 `latest.json` 和 `.nsis.zip`，`release.ps1` 跟着变复杂
+- 换来的只是「少手动确认一下」
 
-换来的只是"少手动确认一下"。对个人项目不值，所以选了"提醒 + 一键复制升级命令"。以后项目长大要切过去，改产物格式的代价还是一样的，不会因为现在这个选择变高。
+对个人项目不值。所以维持「提醒 + 一键复制升级命令」，升级就是再跑一次新版安装包。这是一个明确的选择而不是遗漏，以后要切过去，代价和现在一样，不会因为这个选择变高。
 
 顺带一个好处：GitHub API 对 releases 返回 `Access-Control-Allow-Origin: *`（实测过），所以版本检查完全在前端 `fetch`，**Rust 侧没有引入任何 HTTP 客户端依赖**。
 
@@ -321,9 +344,33 @@ claude-pet.exe --settings             # 启动并直接打开设置窗口（这�
 .\tools\release.ps1 -Bump minor -DryRun
 ```
 
-一条龙：改 `Cargo.toml` 版本号 → 把 CHANGELOG 的 `[Unreleased]` 提升成带日期的版本段 → `cargo build --release` → 打包 zip → commit + tag + push → `gh release create`（release notes 从 CHANGELOG 那一段抠出来）。
+一条龙：改 `Cargo.toml` 版本号 → 把 CHANGELOG 的 `[Unreleased]` 提升成带日期的版本段 → `cargo tauri build --bundles nsis` → 打包 zip + 重命名安装包 → commit + tag + push → `gh release create`（release notes 从 CHANGELOG 那一段抠出来）。
 
-要求工作区干净，并且 `cargo` / `git` / `gh` 都在 PATH 上。新改动写在 CHANGELOG 的 `[Unreleased]` 下面。
+每次发两个产物：`claude-pet-x.y.z-x64-setup.exe`（安装包）和 `claude-pet-x.y.z-windows-x64.zip`（绿色版，`install.ps1` 认的是这个）。安装包要重命名是因为 tauri 用 `productName` 当文件名，`Claude Pet_...` 里的空格在下载 URL 里会变成 `%20`。
+
+要求工作区干净，并且 `cargo` / `git` / `gh` / `cargo-tauri` 都在 PATH 上。新改动写在 CHANGELOG 的 `[Unreleased]` 下面。
+
+### NSIS 工具链下载会失败，且报错完全看不出是网络
+
+第一次打包时 `tauri-bundler` 会去 GitHub 下 `nsis-3.11.zip` 和 `nsis_tauri_utils.dll`。它的下载器**没有重试**，网络抖一下就抛 `io: unexpected end of file` —— 看起来像仓库坏了。实测同一个文件用 `curl --retry` 一次就成。
+
+`release.ps1` 在这一步失败时会直接把手动布置工具链的命令打出来。要点：
+
+- 缓存目录是 `%LOCALAPPDATA%\tauri\NSIS\`（`dirs::cache_dir()/tauri/NSIS`）
+- zip 解出来的顶层目录 `nsis-3.11` 要**重命名**成 `NSIS`，bundler 就是这么做的
+- 还要单独放 `NSIS\Plugins\x86-unicode\additional\nsis_tauri_utils.dll`
+- bundler 会校验一份 13 个文件的清单，缺任何一个就把整个目录删掉重下 —— 所以少放一个文件比不放更糟
+
+校验和（对得上就说明下载完整，来自 `tauri-bundler` 源码里的常量）：
+
+| 文件 | SHA1 |
+| --- | --- |
+| `nsis-3.11.zip` | `EF7FF767E5CBD9EDD22ADD3A32C9B8F4500BB10D` |
+| `nsis_tauri_utils.dll` (v0.5.3) | `75197FEE3C6A814FE035788D1C34EAD39349B860` |
+
+### 语言名是 `SimpChinese`，不是 `SimplifiedChinese`
+
+`nsis.languages` 里的名字必须逐字对上 NSIS 自己的 `Contrib\Language files\*.nlf`。那里的文件叫 `SimpChinese.nlf` / `TradChinese.nlf`。写成 `SimplifiedChinese` 的话，tauri 只会警告一句「not translated」，然后 `makensis` 才因为找不到 `.nlf` 而中止 —— 警告和真正的错误分在两处，容易看漏。
 
 ## 前端没有构建步骤
 
