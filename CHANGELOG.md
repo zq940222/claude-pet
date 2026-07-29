@@ -8,6 +8,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- **[ADR 0001](docs/adr/0001-no-tab-precise-jump-back-on-windows.md)**（#12）—— 调研「跳回会话所在的终端 tab」，结论是**不实现**。
+  - `wt` 确实有 `focus-tab --target`（`TerminalApp.dll` 里可查到），此前判断「不支持」是无效测试所致（PATH 上的 `wt.exe` 是 0 字节的 WindowsApps 别名 stub）
+  - 但 `wt` **没有任何查询类子命令**，操作系统侧也无法把 ConPTY 映射到 tab 索引 —— 能命令、不能发现目标索引，等于不可实现
+  - 实测本机所有 Claude Code 会话**都不在终端里**：真实宿主是 Claude 桌面应用，对全部会话只暴露一个 HWND 和一个不含项目名的标题
+  - 唯一未走到底的线索是 `claude://` 深链（协议已注册，二进制含 `deeplink`，但无 `--session` 类字符串）；刻意没探测，因为那会导航用户正在使用的应用
+  - README 中相应说法从「另有 issue 调研」更新为结论 + ADR 链接
+
 ## [0.2.0] - 2026-07-29
 ### Added
 

@@ -196,7 +196,9 @@ claude-pet.exe --open D:\some\project
 
 会打印探测到的编辑器列表和实际结果，把「编辑器探测/启动」这一环单独拎出来验，不用猜是 UI 没响应还是 spawn 失败。
 
-**终端的 tab 级跳回不在这里** —— 那条在 Windows 上有结构性障碍（Windows Terminal 单 HWND 多 Tab），另有 issue 调研。
+**没有「跳回会话所在的终端 tab」这个功能，而且不会有。** 已调研并定性为不可行，结论见 [ADR 0001](docs/adr/0001-no-tab-precise-jump-back-on-windows.md)。
+
+一句话版：`wt` 有 `focus-tab --target <n>`，但**没有任何查询类子命令**，操作系统侧也无法把 ConPTY 映射到 tab 索引 —— 能命令、不能发现那个 `n`，等于不能用。而且实测本机所有 Claude Code 会话根本不在终端里，真实宿主（Claude 桌面应用）对全部会话只暴露一个窗口和一个不含项目名的标题。
 
 ## 在挂件上批准权限（默认关闭）
 
