@@ -13,6 +13,8 @@
 *.lock  text eol=lf
 .gitignore     text eol=lf
 .gitattributes text eol=lf
+# 没有扩展名，不加这条会走 text=auto 在 Windows 上检出成 CRLF
+LICENSE        text eol=lf
 
 # PowerShell 脚本只在 Windows 跑，按 Windows 惯例用 CRLF。
 # 注意：这些文件带 UTF-8 BOM（PowerShell 5.1 不认无 BOM 的 UTF-8 中文），
