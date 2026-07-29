@@ -10,6 +10,8 @@
 
 ### Added
 
+- **`LICENSE`：Apache-2.0**（#15）—— apache.org 的原文（11358 字节 / 202 行 / 9 条条款，已校验）。`Cargo.toml` 补上 `license` 和 `repository` 字段。本项目只参考了 Open Island（GPL v3）的功能设计、未移植其代码，因此不受 GPL 传染。
+
 - **新版本提醒**（#9）—— 启动查一次 GitHub Releases，有新版本就在概览行末尾追加提示；设置窗口可手动检查并给出可复制的升级命令。自动检查可关（是一次对外网络请求）。
   - **没有采用 `tauri-plugin-updater`**：读它的 Windows 逻辑（`updater.rs:883-913`）发现它解压 zip 后只认 `.exe`（当 NSIS 安装包）或 `.msi`，而我们发的是便携 zip 里的应用本体，被静默安装参数执行不会安装任何东西。要用它就得改发 NSIS 安装包，代价是丢掉便携免管理员的发布形式、多一把丢了就让所有已装版本永久失去更新能力的私钥、以及安装路径和自启路径全变。换来的只是少一次手动确认，对个人项目不值
   - GitHub API 对 releases 返回 `Access-Control-Allow-Origin: *`（实测），所以检查完全在前端 `fetch`，**Rust 侧零新增依赖**

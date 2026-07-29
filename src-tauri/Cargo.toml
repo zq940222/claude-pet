@@ -3,6 +3,8 @@ name = "claude-pet"
 version = "0.1.0"
 description = "Always-on-top desktop pet that shows Claude Code status"
 edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/zq940222/claude-pet"
 # 1.77.2 是 tauri-plugin-autostart 2.5 要求的下限；写 1.77 会让 cargo add
 # 误判并把依赖降成 2.0.0-rc.1 当下限。
 rust-version = "1.77.2"

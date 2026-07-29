@@ -354,3 +354,11 @@ claude-pet.exe --settings             # 启动并直接打开设置窗口（这�
 - **圆角外的小块透明区域仍会吃点击** —— 影响很小，真要修就得上命中测试。
 - **`permission_prompt` 在 `bypassPermissions` 模式下几乎不触发** —— 这个模式下 Claude Code 不问权限。实际会响的是 `agent_needs_input` / `idle_prompt` / `agent_completed`。
 - 端口硬编码 47800，改的话记得同步 `~/.claude/settings.json` 里的 hook url。
+
+## 许可
+
+[Apache License 2.0](LICENSE)。
+
+功能设计上参考了 [Open Island](https://github.com/Octane0411/open-vibe-island)（macOS，GPL v3），但**没有移植其任何代码** —— 差异见上文「新版本提醒」和「双击宠物跳回编辑器」两节里关于 Windows 平台限制的说明。所以本项目不受 GPL 传染，可以用 Apache-2.0。
+
+`LICENSE` 是 apache.org 的原文，附录里的 `[yyyy] [name of copyright owner]` 模板按惯例保持原样（Kubernetes 等项目也是这么做的）。想显式声明版权人的话，标准做法是加一个 `NOTICE` 文件或在源文件头部加声明。
