@@ -147,6 +147,10 @@ pub struct Prefs {
     /// 默认开是因为不知道有新版本等于没有更新机制。
     #[serde(default = "default_true")]
     pub check_updates: bool,
+    /// 挂件摆在哪：`bottom-right`（默认）/ `top-center` / `free`。
+    /// 前两个是**吸附**模式，拖动不留痕；`free` 才记住拖动位置。
+    #[serde(default = "default_position_mode")]
+    pub position_mode: String,
 }
 
 fn default_true() -> bool {
@@ -160,6 +164,13 @@ fn default_editor() -> String {
 fn default_lang() -> String {
     "auto".to_string()
 }
+
+fn default_position_mode() -> String {
+    "bottom-right".to_string()
+}
+
+/// 合法的摆放模式。刘海 overlay 在 Windows 上不存在，`top-center` 是它的等价物。
+pub const POSITION_MODES: &[&str] = &["bottom-right", "top-center", "free"];
 
 fn default_shortcut_toggle() -> String {
     "Ctrl+Alt+P".to_string()
@@ -193,6 +204,7 @@ impl Default for Prefs {
             shortcut_next: default_shortcut_next(),
             lang: default_lang(),
             check_updates: true,
+            position_mode: default_position_mode(),
         }
     }
 }
@@ -217,6 +229,9 @@ impl Prefs {
         }
         if !matches!(self.lang.as_str(), "auto" | "zh" | "en") {
             self.lang = default_lang();
+        }
+        if !POSITION_MODES.contains(&self.position_mode.as_str()) {
+            self.position_mode = default_position_mode();
         }
     }
 
@@ -277,7 +292,11 @@ pub fn save_prefs(app: &AppHandle, prefs: &Prefs) {
 
 // ── 窗口锚点 ─────────────────────────────────────────────────
 
-/// 存右下角而不是左上角 —— 和 `resize_pet` 的锚定方向保持一致。
+/// 存右下角而不是左上角。
+///
+/// 只有 `free` 摆放模式会读它 —— 另两个模式的位置是按屏幕算出来的。但**写**
+/// 是一直写的（连吸附时的程序化移动也记），这样从吸附切到 `free` 时挂件停在
+/// 原地，而不是跳回几天前的某个旧坐标。
 #[derive(Serialize, Deserialize)]
 pub struct SavedAnchor {
     pub right: i32,

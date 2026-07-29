@@ -525,31 +525,64 @@ fn set_permission_hook(app: AppHandle, install: bool, matcher: String) -> Result
 
 /// 前端量完内容后调这里改窗口大小。
 ///
-/// 关键：**右边和底边都要锚定**，让窗口朝左上生长。挂件停在屏幕右下角，
-/// 按左上角改尺寸的话，变高会长出屏幕底部、变宽会冲出屏幕右缘 ——
-/// 折叠态的宠物点阵横向增长时尤其明显。
+/// **锚定方向必须随摆放模式变**，否则窗口会朝错的方向长出屏幕：
+///
+/// | 模式 | 保持不动的边 | 不这么做的后果 |
+/// | --- | --- | --- |
+/// | `bottom-right` | 右 + 底（朝左上长） | 变高长出屏幕底部、变宽冲出右缘 |
+/// | `top-center` | 上 + 水平中心（朝下长） | 按右下锚定会朝上长出屏幕顶部 |
+/// | `free` | 离窗口最近的那两条边 | 拖到左上角后朝左上长就出界 |
+///
+/// 最后无条件夹一次边界，因为「锚对边」还不足以保证不出界。
 #[tauri::command]
-fn resize_pet(app: AppHandle, width: f64, height: f64) -> Result<(), String> {
+fn resize_pet(
+    app: AppHandle,
+    prefs: tauri::State<PrefsState>,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
     let win = app
         .get_webview_window("pet")
         .ok_or_else(|| "pet window missing".to_string())?;
 
-    // 先记下旧的右下角（物理像素）
+    let mode = prefs
+        .lock()
+        .map(|p| PositionMode::parse(&p.position_mode))
+        .unwrap_or(PositionMode::BottomRight);
+
     let old_pos = win.outer_position().map_err(|e| e.to_string())?;
     let old_size = win.outer_size().map_err(|e| e.to_string())?;
-    let right = old_pos.x + old_size.width as i32;
-    let bottom = old_pos.y + old_size.height as i32;
+    let (old_w, old_h) = (old_size.width as i32, old_size.height as i32);
 
     win.set_size(LogicalSize::new(width, height))
         .map_err(|e| e.to_string())?;
 
-    // 改完再读实际尺寸，反算左上角让右下角回到原处
+    // 改完再读实际尺寸 —— set_size 收的是逻辑像素，实际物理尺寸要回读
     let new_size = win.outer_size().map_err(|e| e.to_string())?;
-    win.set_position(tauri::PhysicalPosition {
-        x: right - new_size.width as i32,
-        y: bottom - new_size.height as i32,
-    })
-    .map_err(|e| e.to_string())?;
+    let (new_w, new_h) = (new_size.width as i32, new_size.height as i32);
+
+    let (x, y) = match mode {
+        // 吸附模式直接重算目标位置，不依赖旧坐标
+        PositionMode::BottomRight | PositionMode::TopCenter => {
+            snap_position(&win, mode, new_w, new_h)
+                .unwrap_or((old_pos.x, old_pos.y))
+        }
+        PositionMode::Free => {
+            // 按窗口中心落在显示器的哪个象限，决定保持哪两条边 ——
+            // 也就是「朝离得最远的方向长」，这样不管拖到哪都不会立刻撞边。
+            let (mx, my, mw, mh) = monitor_rect(&win).unwrap_or((0, 0, i32::MAX, i32::MAX));
+            let keep_right = old_pos.x + old_w / 2 > mx + mw / 2;
+            let keep_bottom = old_pos.y + old_h / 2 > my + mh / 2;
+            (
+                if keep_right { old_pos.x + old_w - new_w } else { old_pos.x },
+                if keep_bottom { old_pos.y + old_h - new_h } else { old_pos.y },
+            )
+        }
+    };
+
+    let (x, y) = clamp_into_monitor(&win, x, y, new_w, new_h);
+    win.set_position(tauri::PhysicalPosition { x, y })
+        .map_err(|e| e.to_string())?;
 
     Ok(())
 }
@@ -732,6 +765,64 @@ fn spawn_server(app: AppHandle, store: Store, prefs: PrefsState, pending: Pendin
 //
 // 锚点的读写在 `persist` 模块，和会话缓存放一起。
 
+/// 挂件摆在哪。
+///
+/// `TopCenter` 是刘海 overlay 在 Windows 上的等价物（Windows 没有刘海）。
+///
+/// 前两个是**吸附**模式：位置由屏幕算出来，拖动不留痕。只有 `Free` 记住拖动。
+/// 不做「拖一下就自动切成 Free」那种聪明劲 —— 那是会让人意外的隐式状态变化。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PositionMode {
+    BottomRight,
+    TopCenter,
+    Free,
+}
+
+impl PositionMode {
+    fn parse(s: &str) -> Self {
+        match s {
+            "top-center" => PositionMode::TopCenter,
+            "free" => PositionMode::Free,
+            _ => PositionMode::BottomRight,
+        }
+    }
+}
+
+/// 离屏幕边缘留的空隙。
+const EDGE_MARGIN: i32 = 24;
+
+/// 任务栏高度的估值。
+///
+/// Tauri 的 monitor API 只给整屏尺寸，拿不到工作区（`SPI_GETWORKAREA`），
+/// 所以底部吸附只能减一个估值。顶部吸附不需要它 —— 任务栏默认在底部。
+const TASKBAR_GUESS: i32 = 56;
+
+/// 窗口当前所在显示器的矩形（物理像素）：(x, y, w, h)。
+///
+/// 用 `current_monitor` 而不是主显示器，这样多显示器下吸附会落在
+/// 挂件**当前所在**的那块屏上。
+fn monitor_rect(win: &WebviewWindow) -> Option<(i32, i32, i32, i32)> {
+    let m = win.current_monitor().ok().flatten()?;
+    let p = m.position();
+    let s = m.size();
+    Some((p.x, p.y, s.width as i32, s.height as i32))
+}
+
+/// 把 (x, y) 夹进显示器边界，保证窗口任何一边都不越出。
+///
+/// 这是**无条件**的兜底：不管上面按什么模式算出的坐标，最后都过这一道。
+/// 光靠「锚对边」不够 —— Free 模式下窗口可能被拖到任意位置，
+/// 朝哪个方向长都可能出界。
+fn clamp_into_monitor(win: &WebviewWindow, x: i32, y: i32, w: i32, h: i32) -> (i32, i32) {
+    let Some((mx, my, mw, mh)) = monitor_rect(win) else {
+        return (x, y);
+    };
+    // 窗口比屏幕还大时 max 会小于 min，此时贴左上角而不是产生负数区间
+    let max_x = (mx + mw - w).max(mx);
+    let max_y = (my + mh - h).max(my);
+    (x.clamp(mx, max_x), y.clamp(my, max_y))
+}
+
 /// 保存的坐标必须落在某个「当前可用」的显示器里才能用。
 /// 笔记本插拔扩展屏后旧坐标会把挂件扔到看不见的地方 —— 那种情况下
 /// 用户只会以为程序坏了，因为窗口没有标题栏也不在任务栏，找不回来。
@@ -746,38 +837,54 @@ fn point_is_visible(win: &WebviewWindow, x: i32, y: i32) -> bool {
     })
 }
 
-/// 初始摆到右下角。减掉 56px 粗略避开任务栏 —— Tauri 的 monitor API
-/// 给的是整个屏幕尺寸，拿不到工作区，所以这里只能估。
-fn position_bottom_right(win: &WebviewWindow) {
-    if let (Ok(Some(monitor)), Ok(size)) = (win.current_monitor(), win.outer_size()) {
-        let ms = monitor.size();
-        let mp = monitor.position();
-        let margin = 24i32;
-        let x = mp.x + ms.width as i32 - size.width as i32 - margin;
-        let y = mp.y + ms.height as i32 - size.height as i32 - margin - 56;
-        let _ = win.set_position(tauri::PhysicalPosition { x, y });
+/// 按摆放模式算出窗口左上角该在哪（物理像素）。
+///
+/// `Free` 返回 `None` —— 那个模式的位置来自保存的锚点而不是算出来的。
+fn snap_position(win: &WebviewWindow, mode: PositionMode, w: i32, h: i32) -> Option<(i32, i32)> {
+    let (mx, my, mw, mh) = monitor_rect(win)?;
+    match mode {
+        PositionMode::BottomRight => Some((
+            mx + mw - w - EDGE_MARGIN,
+            my + mh - h - EDGE_MARGIN - TASKBAR_GUESS,
+        )),
+        // 水平居中、贴近上边。顶部不用避让任务栏。
+        PositionMode::TopCenter => Some((mx + (mw - w) / 2, my + EDGE_MARGIN / 2)),
+        PositionMode::Free => None,
     }
 }
 
-fn restore_position(win: &WebviewWindow, app: &AppHandle) {
-    if let Some(saved) = persist::read_anchor(app) {
-        if let Ok(size) = win.outer_size() {
-            let x = saved.right - size.width as i32;
-            let y = saved.bottom - size.height as i32;
-            // 校验左上角和右下角都在屏幕内 —— 只查一个角的话，
+/// 把挂件摆到位。启动时和切换摆放模式时都走这里。
+fn place_window(win: &WebviewWindow, app: &AppHandle, mode: PositionMode) {
+    let Ok(size) = win.outer_size() else { return };
+    let (w, h) = (size.width as i32, size.height as i32);
+
+    let target = match snap_position(win, mode, w, h) {
+        Some(p) => Some(p),
+        // Free：用保存的右下角锚点反算左上角
+        None => persist::read_anchor(app).and_then(|saved| {
+            let (x, y) = (saved.right - w, saved.bottom - h);
+            // 左上角和右下角都要在屏幕内 —— 只查一个角的话，
             // 换了分辨率后窗口可能一半在屏幕外
             if point_is_visible(win, x, y) && point_is_visible(win, saved.right - 1, saved.bottom - 1)
             {
-                let _ = win.set_position(tauri::PhysicalPosition { x, y });
-                return;
+                Some((x, y))
+            } else {
+                eprintln!(
+                    "[claude-pet] 保存的锚点 (right {}, bottom {}) 已在屏幕外，回落右下角",
+                    saved.right, saved.bottom
+                );
+                None
             }
-            eprintln!(
-                "[claude-pet] saved anchor (right {}, bottom {}) is off-screen, using default",
-                saved.right, saved.bottom
-            );
-        }
-    }
-    position_bottom_right(win);
+        }),
+    };
+
+    // Free 模式下锚点无效时回落右下角：宁可摆错位置，也不能让一个
+    // 没有标题栏、不在任务栏的窗口停在看不见的地方。
+    let (x, y) = target
+        .or_else(|| snap_position(win, PositionMode::BottomRight, w, h))
+        .unwrap_or((0, 0));
+    let (x, y) = clamp_into_monitor(win, x, y, w, h);
+    let _ = win.set_position(tauri::PhysicalPosition { x, y });
 }
 
 // ── 全局快捷键 ───────────────────────────────────────────────
@@ -855,6 +962,8 @@ struct SettingsView {
     /// 权限拦截 hook 装了没；装了就是它的 matcher。None = 没装。
     permission_matcher: Option<String>,
     permission_wait_secs: u64,
+    /// 合法的摆放模式，设置窗口用它填下拉框
+    position_modes: Vec<String>,
     /// 解析后的语言（`"auto"` 已经变成 `zh` / `en`）。
     /// 前端不自己猜系统语言 —— 两边各猜一次必然会有不一致的时候。
     lang_code: String,
@@ -879,6 +988,7 @@ fn get_settings(app: AppHandle, prefs: tauri::State<PrefsState>) -> SettingsView
         hooks_total,
         permission_matcher: hooks::permission_status(&app),
         permission_wait_secs: PERMISSION_WAIT.as_secs(),
+        position_modes: persist::POSITION_MODES.iter().map(|s| s.to_string()).collect(),
         lang_code,
         about: AboutInfo {
             version: app.package_info().version.to_string(),
@@ -907,17 +1017,25 @@ fn apply_prefs(
     next.sanitise();
 
     // 在锁里算出「哪些变了」，出了锁再去做重扫/重注册这些慢动作
-    let (window_changed, shortcuts_changed, lang_changed) = {
+    let (window_changed, shortcuts_changed, lang_changed, position_changed) = {
         let mut p = prefs_state.lock().map_err(|_| "prefs lock poisoned")?;
         let changed = (
             p.discover_window_minutes != next.discover_window_minutes,
             p.shortcut_toggle != next.shortcut_toggle || p.shortcut_next != next.shortcut_next,
             p.resolved_lang() != next.resolved_lang(),
+            p.position_mode != next.position_mode,
         );
         *p = next.clone();
         persist::save_prefs(&app, &p);
         changed
     };
+
+    // 摆放模式的「立即生效」= 马上挪过去。光存下来不动，用户会以为没生效。
+    if position_changed {
+        if let Some(win) = app.get_webview_window("pet") {
+            place_window(&win, &app, PositionMode::parse(&next.position_mode));
+        }
+    }
 
     // 挂件要重渲染成新语言。托盘菜单不跟着变（Tauri 菜单项文本不能原地改，
     // 为此重建整个托盘不值得），所以设置界面里注明了要重启才生效。
@@ -1458,16 +1576,19 @@ fn main() {
             // 偏好要在建托盘之前读 —— 托盘的「提示音」勾选状态来自它
             let mut window = persist::Prefs::default().discover_window();
             let mut startup_lang = i18n::Lang::Zh;
+            let mut startup_position_mode = persist::Prefs::default().position_mode;
             if let Ok(mut p) = prefs.lock() {
                 *p = persist::load_prefs(&handle);
                 window = p.discover_window();
                 startup_lang = p.resolved_lang();
+                startup_position_mode = p.position_mode.clone();
                 eprintln!(
-                    "[claude-pet] prefs: lang={} muted={} sound={} window={}min",
+                    "[claude-pet] prefs: lang={} muted={} sound={} window={}min position={}",
                     startup_lang.code(),
                     p.muted,
                     p.sound,
-                    p.discover_window_minutes
+                    p.discover_window_minutes,
+                    p.position_mode
                 );
             }
 
@@ -1504,7 +1625,7 @@ fn main() {
             if let Some(win) = app.get_webview_window("pet") {
                 // 窗口在 config 里是 visible:false，先摆好位置再 show，
                 // 否则会先在默认位置闪一下再跳到恢复的位置。
-                restore_position(&win, &handle);
+                place_window(&win, &handle, PositionMode::parse(&startup_position_mode));
                 let _ = win.show();
                 let _ = win.set_always_on_top(true);
 

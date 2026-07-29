@@ -60,6 +60,12 @@
     "set.lang": "界面语言",
     "set.langAuto": "跟随系统",
     "set.langHint": "改完立即生效。托盘菜单要重启挂件才会跟着变。",
+    "set.position": "挂件位置",
+    "pos.bottom-right": "右下角",
+    "pos.top-center": "顶部居中",
+    "pos.free": "跟随上次拖动",
+    "set.positionHint":
+      "「右下角」和「顶部居中」是<strong>吸附</strong>模式，位置由屏幕算出来，拖动不留痕；想拖到哪算哪就选「跟随上次拖动」。多显示器下吸附到挂件当前所在的那块屏。",
 
     "set.sound": "提示音",
     "set.soundOn": "进入等待态时提示",
@@ -123,6 +129,7 @@
     "what.editor": "编辑器",
     "what.shortcut": "快捷键",
     "what.lang": "语言",
+    "what.position": "位置",
   },
 
   en: {
@@ -169,6 +176,12 @@
     "set.langAuto": "Follow system",
     "set.langHint":
       "Applies immediately. The tray menu follows after a restart.",
+    "set.position": "Widget position",
+    "pos.bottom-right": "Bottom right",
+    "pos.top-center": "Top centre",
+    "pos.free": "Wherever you last dragged it",
+    "set.positionHint":
+      "Bottom right and top centre are <strong>snap</strong> modes: the position is computed from the screen and dragging does not stick. Pick the last option to place it yourself. On multiple monitors it snaps to whichever monitor the widget is currently on.",
 
     "set.sound": "Sound",
     "set.soundOn": "Play a sound when a session starts waiting",
@@ -232,6 +245,7 @@
     "what.editor": "Editor",
     "what.shortcut": "Shortcut",
     "what.lang": "Language",
+    "what.position": "Position",
   },
 };
 

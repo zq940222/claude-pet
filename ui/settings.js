@@ -14,6 +14,7 @@ const ui = {
   windowHint: el("windowHint"),
   editor: el("editor"),
   editorHint: el("editorHint"),
+  position: el("position"),
   lang: el("lang"),
   scToggle: el("scToggle"),
   scNext: el("scNext"),
@@ -143,6 +144,16 @@ function fill(v) {
     ? t("set.editorFound", { list: v.editors.map((e) => e.label).join(" / ") })
     : t("set.editorNone");
 
+  // 模式列表由 Rust 侧给，避免前后端各维护一份枚举
+  ui.position.textContent = "";
+  for (const m of v.position_modes) {
+    const o = document.createElement("option");
+    o.value = m;
+    o.textContent = t(`pos.${m}`);
+    ui.position.appendChild(o);
+  }
+  ui.position.value = prefs.position_mode;
+
   ui.lang.value = prefs.lang;
 
   ui.scToggle.value = prefs.shortcut_toggle;
@@ -224,6 +235,11 @@ function wire() {
   ui.editor.addEventListener("change", () => {
     prefs.editor = ui.editor.value;
     apply("what.editor");
+  });
+
+  ui.position.addEventListener("change", () => {
+    prefs.position_mode = ui.position.value;
+    apply("what.position");
   });
 
   ui.lang.addEventListener("change", async () => {
