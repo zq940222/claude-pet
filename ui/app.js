@@ -54,6 +54,8 @@ const app = {
   expanded: false,
   /// null = 跟着自动规则；true = 用户按住开着；false = 用户按住关着
   pinned: null,
+  /// 检查到的新版本号，没有就是 null。只影响概览行的后缀。
+  newVersion: null,
   /// 上一次「等待集合」的签名，用来识别是不是来了新的待处理事项
   lastWaitingSig: "",
   invoke: null,
@@ -216,16 +218,20 @@ function renderStrip(view) {
 }
 
 function renderSummary(view) {
+  let s;
   if (view.total === 0) {
-    el.summary.textContent = t("pet.noSessions");
+    s = t("pet.noSessions");
   } else if (view.waiting > 0) {
-    el.summary.textContent = t("pet.sessionsWaiting", {
-      n: view.total,
-      w: view.waiting,
-    });
+    s = t("pet.sessionsWaiting", { n: view.total, w: view.waiting });
   } else {
-    el.summary.textContent = t("pet.sessions", { n: view.total });
+    s = t("pet.sessions", { n: view.total });
   }
+  // 新版本提示挂在概览行末尾。不另做徽标/弹窗：挂件就这么大，
+  // 而「有新版本」的紧急程度远低于「有会话在等你」，不该抢视觉。
+  if (app.newVersion) {
+    s += ` · ${t("pet.updateAvailable", { latest: app.newVersion })}`;
+  }
+  el.summary.textContent = s;
 }
 
 /// 渲染时记下选中的那个宠物节点，好在工作空间列表滚动时把它带进视野
@@ -372,12 +378,24 @@ async function init() {
 
   // 语言要在第一次 render 之前定。Rust 侧已经把 "auto" 解析成了具体语言，
   // 前端不自己猜系统语言 —— 两边各猜一次必然会有不一致的时候。
+  let boot = null;
   try {
-    window.I18N.setLang(await app.invoke("get_lang"));
+    boot = await app.invoke("get_boot");
+    window.I18N.setLang(boot.lang);
   } catch (err) {
     /* 拿不到就用默认，不该因此白屏 */
   }
   window.I18N.applyI18n();
+
+  // 版本检查放在后台，不 await —— 网络慢或不通时不该拖着挂件不显示。
+  if (boot && boot.check_updates) {
+    window.UPDATE.check(boot.repo, boot.version).then((r) => {
+      if (r && r.newer) {
+        app.newVersion = r.latest;
+        render();
+      }
+    });
+  }
 
   el.toggle.addEventListener("click", (e) => {
     e.stopPropagation();

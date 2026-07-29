@@ -31,12 +31,23 @@ const ui = {
   port: el("port"),
   configDir: el("configDir"),
   repo: el("repo"),
+  checkUpdates: el("checkUpdates"),
+  checkNow: el("checkNow"),
+  updateResult: el("updateResult"),
+  updateCmd: el("updateCmd"),
   toast: el("toast"),
 };
+
+/// 升级命令。和 README / install.ps1 里的写法保持一致 ——
+/// 用 scriptblock 形式是因为 `irm | iex` 传不了参数。
+const UPGRADE_CMD =
+  "& ([scriptblock]::Create((irm https://raw.githubusercontent.com/zq940222/claude-pet/main/tools/install.ps1))) -Autostart -WireHooks";
 
 let invoke = null;
 /// 当前偏好。apply() 每次都发完整对象，所以这里必须始终是最新值。
 let prefs = null;
+/// AboutInfo，检查更新要用它的 repo 和 version。
+let about = null;
 let toastTimer = null;
 
 function toast(msg, isError) {
@@ -97,6 +108,7 @@ async function refreshHooks() {
 
 function fill(v) {
   prefs = v.prefs;
+  about = v.about;
 
   ui.autostart.checked = v.autostart;
 
@@ -157,6 +169,32 @@ function fill(v) {
   ui.port.textContent = `127.0.0.1:${v.about.port}`;
   ui.configDir.textContent = v.about.config_dir;
   ui.repo.textContent = v.about.repo;
+  ui.checkUpdates.checked = prefs.check_updates;
+}
+
+async function runUpdateCheck(about) {
+  ui.checkNow.disabled = true;
+  ui.updateResult.textContent = t("set.checking");
+  ui.updateCmd.hidden = true;
+  const r = await window.UPDATE.check(about.repo, about.version);
+  ui.checkNow.disabled = false;
+
+  if (r.error) {
+    ui.updateResult.textContent = t("set.updateFailed", { err: r.error });
+    return;
+  }
+  if (r.newer) {
+    ui.updateResult.textContent = t("set.updateFound", {
+      latest: r.latest,
+      cur: about.version,
+    });
+    // 命令直接摊开给用户复制。没有 opener 插件，弹不出浏览器也起不了终端，
+    // 而把命令藏起来只会让人去 README 里找。
+    ui.updateCmd.textContent = `${t("set.updateHow")}\n${UPGRADE_CMD}`;
+    ui.updateCmd.hidden = false;
+  } else {
+    ui.updateResult.textContent = t("set.upToDate", { cur: about.version });
+  }
 }
 
 function wire() {
@@ -237,6 +275,17 @@ function wire() {
 
   ui.installHooks.addEventListener("click", () => setHooks(true));
   ui.uninstallHooks.addEventListener("click", () => setHooks(false));
+
+  ui.checkUpdates.addEventListener("change", () => {
+    prefs.check_updates = ui.checkUpdates.checked;
+    apply();
+  });
+
+  ui.checkNow.addEventListener("click", () => {
+    // 手动检查不看 check_updates 开关：那个开关管的是「启动时自动查」，
+    // 关掉它的人仍然可能想主动查一次。
+    if (about) runUpdateCheck(about);
+  });
 
   ui.permOn.addEventListener("change", () => setPermHook(ui.permOn.checked));
   // 改 matcher 等于重装那条 hook（Rust 侧是先摘旧的再装，不会叠加）

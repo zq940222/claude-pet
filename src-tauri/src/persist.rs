@@ -143,6 +143,14 @@ pub struct Prefs {
     /// 界面语言：`"auto"` / `"zh"` / `"en"`。auto 时按系统 UI 语言猜。
     #[serde(default = "default_lang")]
     pub lang: String,
+    /// 启动时检查有没有新版本。**这是一次对外网络请求**，所以必须可关；
+    /// 默认开是因为不知道有新版本等于没有更新机制。
+    #[serde(default = "default_true")]
+    pub check_updates: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_editor() -> String {
@@ -184,6 +192,7 @@ impl Default for Prefs {
             shortcut_toggle: default_shortcut_toggle(),
             shortcut_next: default_shortcut_next(),
             lang: default_lang(),
+            check_updates: true,
         }
     }
 }

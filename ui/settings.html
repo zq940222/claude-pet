@@ -127,11 +127,26 @@
           <dt data-i18n="set.configDir"></dt><dd id="configDir" class="selectable"></dd>
           <dt data-i18n="set.repo"></dt><dd id="repo" class="selectable"></dd>
         </dl>
+
+        <label class="row">
+          <span class="label" data-i18n="set.checkUpdates"></span>
+          <input type="checkbox" id="checkUpdates" />
+        </label>
+        <div class="row">
+          <span class="label"></span>
+          <span class="control">
+            <button type="button" id="checkNow" data-i18n="set.checkNow"></button>
+          </span>
+        </div>
+        <p class="hint" id="updateResult"></p>
+        <p class="hint" data-i18n="set.checkUpdatesHint"></p>
+        <pre id="updateCmd" class="cmd selectable" hidden></pre>
       </section>
     </main>
 
     <div id="toast" class="toast" hidden></div>
     <script src="i18n.js"></script>
+    <script src="update.js"></script>
     <script src="settings.js"></script>
   </body>
 </html>

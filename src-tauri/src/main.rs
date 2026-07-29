@@ -43,6 +43,9 @@ const PORT: u16 = 47800;
 /// 所以最坏情况是每次卡 30 秒，而不是永久卡死 —— 这也是为什么不敢把它设得更长。
 const PERMISSION_WAIT: Duration = Duration::from_secs(30);
 
+/// 仓库地址。前端拿它推出 GitHub API 的 releases 端点做版本检查。
+const REPO_URL: &str = "https://github.com/zq940222/claude-pet";
+
 // ── 会话状态 ─────────────────────────────────────────────────
 
 /// 派生 `Deserialize` 是为了跨启动持久化（见 `persist` 模块）——
@@ -377,16 +380,31 @@ fn get_view(store: tauri::State<Store>, pending: tauri::State<PendingState>) -> 
     build_view(&store, &pending)
 }
 
-/// 挂件启动时问一次语言。**不**塞进 `AppView` —— 那个每来一个 hook 事件就
-/// emit 一次，为一个几乎不变的值搭车没道理。改语言时另发 `pet://lang`。
+/// 挂件启动时一次性拿走它需要的固定信息。
+///
+/// 这些**不**塞进 `AppView`：那个每来一个 hook 事件就 emit 一次，为几乎不变的
+/// 值搭车没道理。语言变化另发 `pet://lang`。
+#[derive(Serialize)]
+struct BootInfo {
+    lang: String,
+    version: String,
+    repo: String,
+    /// 是否允许启动时检查新版本。这是一次对外网络请求，必须可关。
+    check_updates: bool,
+}
+
 #[tauri::command]
-fn get_lang(prefs: tauri::State<PrefsState>) -> String {
-    prefs
+fn get_boot(app: AppHandle, prefs: tauri::State<PrefsState>) -> BootInfo {
+    let (lang, check_updates) = prefs
         .lock()
-        .map(|p| p.resolved_lang())
-        .unwrap_or(i18n::Lang::Zh)
-        .code()
-        .to_string()
+        .map(|p| (p.resolved_lang(), p.check_updates))
+        .unwrap_or((i18n::Lang::Zh, false));
+    BootInfo {
+        lang: lang.code().to_string(),
+        version: app.package_info().version.to_string(),
+        repo: REPO_URL.to_string(),
+        check_updates,
+    }
 }
 
 /// 前端点了允许/拒绝。把决定送给那条挂住的 HTTP 请求线程。
@@ -1411,7 +1429,7 @@ fn main() {
         .manage(pending.clone())
         .invoke_handler(tauri::generate_handler![
             get_view,
-            get_lang,
+            get_boot,
             resize_pet,
             get_settings,
             apply_prefs,

@@ -93,6 +93,18 @@
     "set.port": "监听端口",
     "set.configDir": "配置目录",
     "set.repo": "仓库",
+    "set.checkUpdates": "启动时检查新版本",
+    "set.checkNow": "立即检查",
+    "set.checking": "检查中…",
+    "set.upToDate": "已是最新（v{cur}）",
+    "set.updateFound": "有新版本 v{latest}（当前 v{cur}）",
+    "set.updateHow": "升级命令（复制到 PowerShell 执行）：",
+    "set.updateFailed": "检查失败：{err}",
+    "set.checkUpdatesHint":
+      "这是一次对 GitHub 的网络请求，不想联网可以关掉。关掉后仍可点「立即检查」。",
+
+    // 挂件上的新版本提示
+    "pet.updateAvailable": "有新版本 v{latest}",
 
     "set.saved": "已保存",
     "set.savedWhat": "{what}已保存",
@@ -191,6 +203,17 @@
     "set.port": "Listening on",
     "set.configDir": "Config directory",
     "set.repo": "Repository",
+    "set.checkUpdates": "Check for updates on startup",
+    "set.checkNow": "Check now",
+    "set.checking": "Checking…",
+    "set.upToDate": "Up to date (v{cur})",
+    "set.updateFound": "v{latest} is available (you have v{cur})",
+    "set.updateHow": "Upgrade command (paste into PowerShell):",
+    "set.updateFailed": "Check failed: {err}",
+    "set.checkUpdatesHint":
+      "This makes one network request to GitHub. Turn it off to stay offline; \"Check now\" still works.",
+
+    "pet.updateAvailable": "v{latest} is available",
 
     "set.saved": "Saved",
     "set.savedWhat": "{what} saved",

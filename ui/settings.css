@@ -238,6 +238,27 @@ button:disabled {
   cursor: text;
 }
 
+.cmd {
+  background: #14161b;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-top: 6px;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 11px;
+  color: #c3cad5;
+  /* 命令很长，允许换行而不是横向滚动 —— 要用户手动复制的东西，
+     藏在滚动条后面就等于没给 */
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* `hidden` 属性对设了 display 的元素无效（UA 样式表优先级更低），
+   这里 <pre> 的默认 display 是 block，所以必须显式补这条。 */
+.cmd[hidden] {
+  display: none;
+}
+
 /* ── 保存提示 ───────────────────────────────────────────── */
 
 .toast {
