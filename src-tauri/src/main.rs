@@ -745,8 +745,9 @@ fn resize_pet(
     };
 
     let (x, y) = clamp_into_monitor(&win, x, y, new_w, new_h);
-    win.set_position(tauri::PhysicalPosition { x, y })
-        .map_err(|e| e.to_string())?;
+    // 走 set_position_quietly：这是程序化移动，不能被当成用户拖动，
+    // 否则悬停展开一次就会「入坞」并把摆放模式改掉。
+    set_position_quietly(&win, &app, x, y);
 
     Ok(())
 }
@@ -1023,6 +1024,154 @@ fn snap_position(win: &WebviewWindow, mode: PositionMode, w: i32, h: i32) -> Opt
     }
 }
 
+// ── 拖到屏幕边缘入坞 ─────────────────────────────────────────
+//
+// 拖动结束后，如果挂件离某条屏幕边足够近，就把它贴上去并收起。
+//
+// # 为什么入坞会把摆放模式改成 `free`
+//
+// `bottom-right` / `top-center` 是**吸附**模式，位置由屏幕算出来、拖动
+// 不留痕。所以在那两个模式下拖到边上再松手，下一次 `resize_pet` 会立刻把
+// 挂件弹回算出来的位置 —— 用户看到的是「拖了但没用」。
+//
+// 之前刻意不做「拖一下自动切成 free」，理由是隐式状态变化会让人意外。
+// 入坞是用户**主动拖到边上**的结果，意图明确，那条理由不适用；而且我们把
+// 模式真的写进 `prefs.json`，设置窗口的下拉框会跟着变成「跟随上次拖动」——
+// 所以这是一次**看得见**的模式切换，不是背着人改状态。
+//
+// # 拖动结束怎么判断
+//
+// Tauri 的 `data-tauri-drag-region` **不产生 drag-end 事件**，只有连续的
+// `WindowEvent::Moved`。所以靠「Moved 停了一会儿」来判断：记下最后一次
+// Moved 的时刻，由一个短周期线程发现它超过 `DRAG_SETTLE` 没再动就当拖完了。
+//
+// 不用 `GetAsyncKeyState(VK_LBUTTON)` 查鼠标键：那要么轮询得很密，
+// 要么在用键盘/触摸板惯性移动窗口时判断错。
+
+/// 离屏幕边多近才算「要入坞」。
+///
+/// 60px 是拖动时手不容易停准的量级。太小会让入坞很难触发（用户以为功能坏了），
+/// 太大会让「我只是想放在靠边一点的位置」变成不由自主地被吸走。
+const DOCK_THRESHOLD: i32 = 60;
+
+/// 入坞后离屏幕边留的缝。
+///
+/// 不做成完全贴死（0）：窗口是透明圆角的，贴死之后圆角外那点透明区域会压在
+/// 屏幕最边缘，鼠标很难从边上滑进去把它唤出来。
+const DOCK_GAP: i32 = 2;
+
+/// `Moved` 停多久算拖动结束。
+///
+/// 250ms：比拖动过程中两次 `Moved` 的间隔长得多，又短到松手后几乎察觉不到延迟。
+const DRAG_SETTLE: Duration = Duration::from_millis(250);
+
+/// 最近一次 `Moved` 的时刻。`None` = 现在没有待处理的拖动。
+type DragState = Arc<Mutex<Option<std::time::Instant>>>;
+
+/// 「在这个时刻之前的 `Moved` 是程序自己挪的，不算用户拖动」。
+///
+/// **不加这个会直接坏掉**：`top-center` 模式下窗口本来就停在离顶边 12px
+/// （`EDGE_MARGIN / 2`）的地方，远在 `DOCK_THRESHOLD`（60px）之内。而
+/// `resize_pet` 每次展开/收起都要 `set_position`，那会发出 `Moved` ——
+/// 于是挂件一被悬停就「入坞」，顺手把用户的摆放模式改成 `free`。
+///
+/// 用时间窗而不是一个布尔量：`Moved` 是异步送达的，`set_position` 返回时
+/// 事件还没到，布尔量一置一清必然漏。而时间窗对**真实**拖动是安全的 ——
+/// 拖动是一串持续的 `Moved`，窗口过期后面的照样会被记下。
+type MoveGuard = Arc<Mutex<std::time::Instant>>;
+
+/// 程序化移动之后忽略 `Moved` 的时长。
+const MOVE_QUIET: Duration = Duration::from_millis(400);
+
+/// 挪窗口，并且告诉拖动检测「这一次是我们自己挪的」。
+///
+/// 所有**程序化**的 `set_position` 都必须走这里；用户拖动不经过我们，
+/// 所以它天然不会被抑制。
+fn set_position_quietly(win: &WebviewWindow, app: &AppHandle, x: i32, y: i32) {
+    if let Some(guard) = app.try_state::<MoveGuard>() {
+        if let Ok(mut until) = guard.lock() {
+            *until = std::time::Instant::now() + MOVE_QUIET;
+        }
+    }
+    let _ = win.set_position(tauri::PhysicalPosition { x, y });
+}
+
+/// 算出入坞后的位置。`None` = 离哪条边都不够近，不入坞。
+///
+/// 四条边分别判断而不是只取最近的一条：拖到角落时两个方向都该贴上去。
+fn dock_position(
+    win: &WebviewWindow,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+) -> Option<(i32, i32)> {
+    let (mx, my, mw, mh) = monitor_rect(win)?;
+    let (mut nx, mut ny) = (x, y);
+    let mut docked = false;
+
+    if x - mx <= DOCK_THRESHOLD {
+        nx = mx + DOCK_GAP;
+        docked = true;
+    } else if (mx + mw) - (x + w) <= DOCK_THRESHOLD {
+        nx = mx + mw - w - DOCK_GAP;
+        docked = true;
+    }
+
+    if y - my <= DOCK_THRESHOLD {
+        ny = my + DOCK_GAP;
+        docked = true;
+    } else if (my + mh) - (y + h) <= DOCK_THRESHOLD {
+        // 底边要避让任务栏，否则挂件会被压在任务栏底下看不见。
+        // 和右下角吸附用同一个估值，见 TASKBAR_GUESS 的说明。
+        ny = my + mh - h - DOCK_GAP - TASKBAR_GUESS;
+        docked = true;
+    }
+
+    if docked {
+        Some((nx, ny))
+    } else {
+        None
+    }
+}
+
+/// 拖动结束后检查一次是否该入坞。
+fn settle_drag(win: &WebviewWindow, app: &AppHandle, prefs: &PrefsState) {
+    let (Ok(pos), Ok(size)) = (win.outer_position(), win.outer_size()) else {
+        return;
+    };
+    let (w, h) = (size.width as i32, size.height as i32);
+    let Some((nx, ny)) = dock_position(win, pos.x, pos.y, w, h) else {
+        return;
+    };
+    // 已经在位就什么都不做 —— 否则每次拖动结束都会发一次收起事件，
+    // 包括那些「拖了两像素」的无意义移动。
+    if (nx - pos.x).abs() < 2 && (ny - pos.y).abs() < 2 {
+        return;
+    }
+
+    let (nx, ny) = clamp_into_monitor(win, nx, ny, w, h);
+    // 入坞这一下也是程序化移动 —— 不抑制的话它自己又会触发一轮拖动结束检测
+    set_position_quietly(win, app, nx, ny);
+
+    // 把模式落成 free，这样吸附模式不会在下一次 resize 时把它弹回去。
+    // 写进 prefs 是刻意的：设置窗口的下拉框要跟着变，让这次切换可见。
+    let mut changed = false;
+    if let Ok(mut p) = prefs.lock() {
+        if p.position_mode != "free" {
+            p.position_mode = "free".to_string();
+            persist::save_prefs(app, &p);
+            changed = true;
+        }
+    }
+    if changed {
+        eprintln!("[claude-pet] 拖到屏幕边缘入坞，摆放模式已切到 free");
+    }
+
+    // 入坞 = 停在边上别挡路，所以收起。前端还要清掉「钉住」状态。
+    let _ = app.emit("pet://docked", ());
+}
+
 /// 把挂件摆到位。启动时和切换摆放模式时都走这里。
 fn place_window(win: &WebviewWindow, app: &AppHandle, mode: PositionMode) {
     let Ok(size) = win.outer_size() else { return };
@@ -1054,7 +1203,7 @@ fn place_window(win: &WebviewWindow, app: &AppHandle, mode: PositionMode) {
         .or_else(|| snap_position(win, PositionMode::BottomRight, w, h))
         .unwrap_or((0, 0));
     let (x, y) = clamp_into_monitor(win, x, y, w, h);
-    let _ = win.set_position(tauri::PhysicalPosition { x, y });
+    set_position_quietly(win, app, x, y);
 }
 
 // ── 全局快捷键 ───────────────────────────────────────────────
@@ -1866,6 +2015,8 @@ fn main() {
     let prefs: PrefsState = Arc::new(Mutex::new(persist::Prefs::default()));
     let tray_state: TrayState = Arc::new(Mutex::new(None));
     let pending: PendingState = Arc::new(Mutex::new(Vec::new()));
+    // 初值取「现在」，也就是一开始不抑制任何东西
+    let move_guard: MoveGuard = Arc::new(Mutex::new(std::time::Instant::now()));
 
     tauri::Builder::default()
         .plugin(tauri_plugin_autostart::init(
@@ -1879,6 +2030,7 @@ fn main() {
         .manage(prefs.clone())
         .manage(tray_state.clone())
         .manage(pending.clone())
+        .manage(move_guard.clone())
         .invoke_handler(tauri::generate_handler![
             get_view,
             get_boot,
@@ -1978,7 +2130,13 @@ fn main() {
                 }
 
                 // 拖动时只记内存，不碰磁盘。存右下角，和 resize_pet 的锚定一致。
+                //
+                // 同时记下最后一次 Moved 的时刻，供下面的入坞线程判断拖动结束 ——
+                // Tauri 的拖动区域不产生 drag-end 事件，只有连续的 Moved。
+                let drag: DragState = Arc::new(Mutex::new(None));
                 let anchor_for_move = anchor.clone();
+                let drag_for_move = drag.clone();
+                let guard_for_move = move_guard.clone();
                 let win_for_move = win.clone();
                 win.on_window_event(move |event| {
                     if let tauri::WindowEvent::Moved(p) = event {
@@ -1990,6 +2148,42 @@ fn main() {
                                 ));
                             }
                         }
+                        // 程序自己挪的不算拖动。不过滤的话，top-center 模式下
+                        // 窗口本来就在离顶边 12px 处，悬停展开触发的
+                        // set_position 会立刻被当成「拖到顶部了」。
+                        let now = std::time::Instant::now();
+                        let ours = guard_for_move
+                            .lock()
+                            .map(|until| now < *until)
+                            .unwrap_or(false);
+                        if !ours {
+                            if let Ok(mut d) = drag_for_move.lock() {
+                                *d = Some(now);
+                            }
+                        }
+                    }
+                });
+
+                // 拖动结束检测。100ms 一轮，只是比较两个时间戳，代价可以忽略；
+                // 真正的活（入坞、写 prefs）只在拖动刚停下的那一轮做一次。
+                let win_for_dock = win.clone();
+                let app_for_dock = handle.clone();
+                let prefs_for_dock = prefs.clone();
+                let drag_for_dock = drag.clone();
+                std::thread::spawn(move || loop {
+                    std::thread::sleep(Duration::from_millis(100));
+                    let settled = match drag_for_dock.lock() {
+                        Ok(mut d) => match *d {
+                            Some(t) if t.elapsed() >= DRAG_SETTLE => {
+                                *d = None; // 取走，保证每次拖动只处理一次
+                                true
+                            }
+                            _ => false,
+                        },
+                        Err(_) => false,
+                    };
+                    if settled {
+                        settle_drag(&win_for_dock, &app_for_dock, &prefs_for_dock);
                     }
                 });
 

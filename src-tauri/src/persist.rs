@@ -177,8 +177,15 @@ fn default_lang() -> String {
     "auto".to_string()
 }
 
+/// 默认摆在**屏幕顶部居中**。
+///
+/// 顶部是这类状态挂件的自然位置：屏幕顶端中央通常没有别的东西，而右下角
+/// 挤着系统托盘、通知弹窗和一堆应用的角标。
+///
+/// 只影响**全新安装** —— 已有的 `prefs.json` 里已经写着明确的值，
+/// 换默认值不该把老用户挪到别处去。
 fn default_position_mode() -> String {
-    "bottom-right".to_string()
+    "top-center".to_string()
 }
 
 fn default_agents() -> Vec<String> {

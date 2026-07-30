@@ -54,6 +54,9 @@ const app = {
   expanded: false,
   /// null = 跟着自动规则；true = 用户按住开着；false = 用户按住关着
   pinned: null,
+  /// 鼠标是不是停在挂件上。悬停是现在的主要展开方式，
+  /// 所以它和「有人在等你」「用户按住开着」是三个并列的展开理由。
+  hovering: false,
   /// 检查到的新版本号，没有就是 null。只影响概览行的后缀。
   newVersion: null,
   /// 上一次「等待集合」的签名，用来识别是不是来了新的待处理事项
@@ -82,6 +85,24 @@ function waitingSignature(view) {
 }
 
 // ── 折叠 / 展开状态机 ────────────────────────────────────────
+//
+// 展开有**三个并列的理由**，任一成立就展开：
+//
+//   1. 有会话在等你      —— 挂件存在的意义，优先级最高
+//   2. 用户按住开着       —— 点一下卡片把它钉住
+//   3. 鼠标停在挂件上     —— 悬停窥视，现在的主要交互方式
+//
+// 收起只在三个都不成立时发生。这条「或」的关系是刻意的：光靠 `pinned` 的
+// 三态（null/true/false）表达不了「悬停」这个临时状态 —— 悬停不该覆盖
+// 用户的钉住，也不该在有人等你时把它藏回去。
+
+/// 当前应该展开吗。**唯一**决定 `expanded` 的地方，
+/// 三个入口（事件、悬停、点击）都走它，避免各自算一遍算出不同结果。
+function shouldExpand(waiting) {
+  if (waiting) return true;
+  if (app.pinned === true) return true;
+  return app.hovering;
+}
 
 function applyCollapseRules(view) {
   const sig = waitingSignature(view);
@@ -92,20 +113,42 @@ function applyCollapseRules(view) {
     // 有新的东西要你处理：强制展开、选中它、并清掉手动状态，
     // 这样等它处理完之后又能自动收起。
     app.pinned = null;
-    app.expanded = true;
     if (view.focus) app.selected = view.focus;
-  } else if (app.pinned === null) {
-    // 自动模式：有人在等你就展开，没有就收起
-    app.expanded = sig !== "";
   }
-  // app.pinned !== null 时保持用户的选择不动
+  app.expanded = shouldExpand(sig !== "");
 }
 
 function toggleExpanded() {
-  app.expanded = !app.expanded;
-  // 记下这是用户的意愿，直到下一批新的等待事项才让位
-  app.pinned = app.expanded;
+  // 点击是「钉住 / 取消钉住」。取消钉住之后如果鼠标还在挂件上，
+  // 它仍然是展开的 —— 这时收起要靠把鼠标移开，和悬停语义一致。
+  app.pinned = app.pinned === true ? null : true;
+  app.expanded = shouldExpand(app.lastWaitingSig !== "");
   render();
+}
+
+/// 鼠标进出。
+///
+/// 离开要延迟一下：展开/收起会改窗口尺寸，而尺寸变化本身可能让 WebView
+/// 瞬间抛出一对 leave/enter —— 不缓冲的话挂件会在边界上抖动。
+/// 进入不延迟，因为「碰一下就展开」的即时感正是这个交互的全部价值。
+const LEAVE_DELAY_MS = 180;
+let leaveTimer = null;
+
+function setHovering(on) {
+  clearTimeout(leaveTimer);
+  if (on) {
+    if (app.hovering) return;
+    app.hovering = true;
+    app.expanded = shouldExpand(app.lastWaitingSig !== "");
+    render();
+    return;
+  }
+  leaveTimer = setTimeout(() => {
+    if (!app.hovering) return;
+    app.hovering = false;
+    app.expanded = shouldExpand(app.lastWaitingSig !== "");
+    render();
+  }, LEAVE_DELAY_MS);
 }
 
 /// 全局快捷键：跳到下一个在等你的会话。
@@ -428,6 +471,15 @@ async function init() {
     toggleExpanded();
   });
 
+  // 悬停窥视。挂在 document 而不是卡片上：窗口尺寸就是卡片尺寸，
+  // 但圆角外那一点点透明区域仍属于窗口，绑在卡片上时鼠标划过圆角
+  // 会多抛一对 leave/enter。
+  //
+  // 用 mouseenter/mouseleave 而不是 mouseover/mouseout —— 后者会随着
+  // 鼠标在子元素之间移动不停冒泡，每动一下就重算一次展开状态。
+  document.addEventListener("mouseenter", () => setHovering(true));
+  document.addEventListener("mouseleave", () => setHovering(false));
+
   // 权限请求：点一次就把按钮禁掉，避免连点重复提交 ——
   // 那条 HTTP 请求只能被决定一次，第二次调用会拿到「已经不在了」的错误。
   for (const [node, allow] of [
@@ -459,6 +511,18 @@ async function init() {
     await tauri.event.listen("pet://lang", (e) => {
       window.I18N.setLang(e.payload);
       window.I18N.applyI18n();
+      render();
+    });
+    // 拖到屏幕边缘入坞之后收起。由 Rust 侧在检测到拖动结束时发过来 ——
+    // 入坞的意思就是「停在边上别挡路」，展开着就没意义了。
+    //
+    // 同时清掉钉住状态：用户刚刚亲手把它拖到边上，那是比之前某次点击
+    // 更新的意图。悬停仍然能把它唤出来。
+    await tauri.event.listen("pet://docked", () => {
+      app.pinned = null;
+      app.hovering = false;
+      clearTimeout(leaveTimer);
+      app.expanded = shouldExpand(app.lastWaitingSig !== "");
       render();
     });
   } catch (err) {
