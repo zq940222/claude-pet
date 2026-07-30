@@ -86,22 +86,27 @@ function waitingSignature(view) {
 
 // ── 折叠 / 展开状态机 ────────────────────────────────────────
 //
-// 展开有**三个并列的理由**，任一成立就展开：
+// 三个输入决定展不展开，**按优先级**而不是简单的「或」：
 //
-//   1. 有会话在等你      —— 挂件存在的意义，优先级最高
-//   2. 用户按住开着       —— 点一下卡片把它钉住
-//   3. 鼠标停在挂件上     —— 悬停窥视，现在的主要交互方式
+//   1. 鼠标停在挂件上   —— 悬停窥视永远有效，任何时候碰一下都能看
+//   2. 用户点了钉住     —— 明确要它开着
+//   3. 用户点了收起     —— 明确要它闭上，**压过下面的「有人在等你」**
+//   4. 有会话在等你     —— 自动展开：要你确认或回话时把自己亮出来
 //
-// 收起只在三个都不成立时发生。这条「或」的关系是刻意的：光靠 `pinned` 的
-// 三态（null/true/false）表达不了「悬停」这个临时状态 —— 悬停不该覆盖
-// 用户的钉住，也不该在有人等你时把它藏回去。
+// 第 3 条压过第 4 条是有意的：用户看见了、知道了，想先把它收起来接着干别的，
+// 就该收得掉。用「或」的话（waiting 直接 return true）会让等待期间点击完全
+// 失效 —— 挂件赖着不走，而用户没有任何办法。
+//
+// 但这个「收起」只管**当前这一批**等待事项：`applyCollapseRules` 在出现
+// 新的等待签名时会把 `pinned` 清回 null，所以下一件需要你的事照样弹出来。
 
 /// 当前应该展开吗。**唯一**决定 `expanded` 的地方，
 /// 三个入口（事件、悬停、点击）都走它，避免各自算一遍算出不同结果。
 function shouldExpand(waiting) {
-  if (waiting) return true;
+  if (app.hovering) return true;
   if (app.pinned === true) return true;
-  return app.hovering;
+  if (app.pinned === false) return false;
+  return waiting;
 }
 
 function applyCollapseRules(view) {
@@ -110,19 +115,31 @@ function applyCollapseRules(view) {
   app.lastWaitingSig = sig;
 
   if (isNewEpisode) {
-    // 有新的东西要你处理：强制展开、选中它、并清掉手动状态，
-    // 这样等它处理完之后又能自动收起。
+    // 有新的东西要你处理：清掉手动状态，让它重新自动展开、并选中它。
+    // 清掉是关键 —— 否则上一批你手动收起过，这一批就再也不会弹出来。
     app.pinned = null;
     if (view.focus) app.selected = view.focus;
   }
   app.expanded = shouldExpand(sig !== "");
 }
 
+/// 点击 / 快捷键：切换「鼠标移开之后它还开着吗」。
+///
+/// 不能写成 `pinned = !expanded`：点击时鼠标必然在挂件上，而悬停优先级最高，
+/// 所以 `expanded` 恒为 true —— 那样每次点击都只会得到「收起」，再也钉不住。
+///
+/// 所以判断的是**移开之后**的状态。这样每种情形都是一次点击就生效：
+///
+/// | 点击前 | openWhenAway | 点击后 |
+/// | --- | --- | --- |
+/// | 空闲、没钉 | false | 钉住，移开也不收 |
+/// | 有人在等你 | true  | 收起这一批，移开就闭上 |
+/// | 已钉住     | true  | 取消钉住 |
 function toggleExpanded() {
-  // 点击是「钉住 / 取消钉住」。取消钉住之后如果鼠标还在挂件上，
-  // 它仍然是展开的 —— 这时收起要靠把鼠标移开，和悬停语义一致。
-  app.pinned = app.pinned === true ? null : true;
-  app.expanded = shouldExpand(app.lastWaitingSig !== "");
+  const waiting = app.lastWaitingSig !== "";
+  const openWhenAway = app.pinned === true || (app.pinned === null && waiting);
+  app.pinned = !openWhenAway;
+  app.expanded = shouldExpand(waiting);
   render();
 }
 
